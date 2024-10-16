@@ -35,9 +35,8 @@
 #include <regex>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
-
-#include "gst_logger_sink.h"
 
 #ifdef ENABLE_VAAPI
 #include "vaapi_utils.h"
@@ -103,7 +102,7 @@ uint32_t GetOptimalBatchSize(const char *device) {
     uint32_t batch_size = 1;
     // if the device has the format GPU.x we assume that these are discrete graphics and choose larger batch
     if (device and std::string(device).find("GPU.") != std::string::npos)
-        batch_size = 64;
+        batch_size = 8;
     return batch_size;
 }
 
@@ -520,24 +519,46 @@ MemoryType GetMemoryType(MemoryType input_image_memory_type, ImagePreprocessorTy
     return type;
 }
 
+bool canReuseSharedVADispCtx(GvaBaseInference *gva_base_inference) {
+    const std::string device(gva_base_inference->device);
+
+    if (device.find("GPU.") == device.npos && device.find("GPU") != device.npos) {
+        // GPU only i.e. all available accelerators
+        return true;
+    }
+
+    // Add check for GPU.x <--> va(renderDXXX)h264dec , va(renderDXXX)postproc
+    {
+        // TODO
+        // if (device.find("GPU.") != device.npos) { }
+        // Reuse shared VADisplay Context if GPU.x == va(renderDXXX)h264dec && va(renderDXXX)postproc
+    }
+
+    return false;
+}
+
 dlstreamer::ContextPtr createVaDisplay(GvaBaseInference *gva_base_inference) {
     assert(gva_base_inference);
 
     auto display = gva_base_inference->priv->va_display;
-    if (display) {
-        std::string display_info = fmt::format("Using shared VADisplay ({}) from element {}", fmt::ptr(display),
-                                               GST_ELEMENT_NAME(gva_base_inference));
-        GVA_INFO("%s", display_info.c_str());
-        return display;
+    const std::string device(gva_base_inference->device);
+
+    // Create a new VADisplay context only if the existing one i.e priv->va_display does not match
+    if (!canReuseSharedVADispCtx(gva_base_inference)) {
+        if (device.find("GPU.") != device.npos) {
+            uint32_t rel_dev_index = 0;
+            rel_dev_index = Utils::getRelativeGpuDeviceIndex(device);
+            display = vaApiCreateVaDisplay(rel_dev_index);
+
+            GVA_INFO("Using new VADisplay (%p) ", static_cast<void *>(display.get()));
+            return display;
+        }
     }
 
-#ifdef ENABLE_VAAPI
-    uint32_t rel_dev_index = 0;
-    const std::string device(gva_base_inference->device);
-    if (device.find("GPU") != device.npos)
-        rel_dev_index = Utils::getRelativeGpuDeviceIndex(device);
-    display = vaApiCreateVaDisplay(rel_dev_index);
-#endif
+    if (display) {
+        GVA_INFO("Using shared VADisplay (%p) from element %s", static_cast<void *>(display.get()),
+                 GST_ELEMENT_NAME(gva_base_inference));
+    }
 
     return display;
 }
@@ -765,6 +786,9 @@ bool InferenceImpl::CheckSrcPadBlocked(GstObject *src) {
     bool blocked = false;
 
     GstObject *dst = gst_pad_get_parent(gst_pad_get_peer(GST_BASE_TRANSFORM_SRC_PAD(src)));
+    if (dst == nullptr)
+        return false;
+
     if (strcmp(dst->name, "queue") > 0) {
         guint buf_cnt;
         g_object_get(dst, "current-level-buffers", &buf_cnt, NULL);
@@ -786,8 +810,7 @@ void InferenceImpl::PushBufferToSrcPad(OutputFrame &output_frame) {
     if (!check_gva_base_inference_stopped(output_frame.filter)) {
         GstFlowReturn ret = gst_pad_push(GST_BASE_TRANSFORM_SRC_PAD(output_frame.filter), buffer);
         if (ret != GST_FLOW_OK) {
-            std::string returned_status = fmt::format("Inference gst_pad_push returned status: {}", ret);
-            GVA_WARNING("%s", returned_status.c_str());
+            GVA_WARNING("Inference gst_pad_push returned status: %d", ret);
         }
     }
 }

@@ -18,6 +18,7 @@
 #include "converters/to_tensor/keypoints_openpose.h"
 #include "converters/to_tensor/label.h"
 #include "converters/to_tensor/raw_data_copy.h"
+#include "converters/to_tensor/semantic_mask.h"
 #include "converters/to_tensor/text.h"
 
 #include "gva_base_inference.h"
@@ -98,6 +99,7 @@ std::string checkOnNameDeprecation(const std::string &converter_name) {
     const std::string GetiOBB = "rotated_detection";
     const std::string YOLOv8 = "YOLOv8";
     const std::string YOLOv8OBB = "YOLOv8-OBB";
+    const std::string YOLOv8SEG = "YOLOv8-SEG";
     const std::unordered_map<std::string, std::string> deprecatedNameToName = {
         {DetectionOutputConverter::getDepricatedName(), DetectionOutputConverter::getName()},
         {BoxesLabelsConverter::getDepricatedName(), BoxesLabelsConverter::getName()},
@@ -113,7 +115,8 @@ std::string checkOnNameDeprecation(const std::string &converter_name) {
         {GetiInstanceSegmentation, MaskRCNNConverter::getName()},
         {GetiOBB, MaskRCNNConverter::getName()},
         {YOLOv8, YOLOv8Converter::getName()},
-        {YOLOv8OBB, YOLOv8OBBConverter::getName()}};
+        {YOLOv8OBB, YOLOv8ObbConverter::getName()},
+        {YOLOv8SEG, YOLOv8SegConverter::getName()}};
 
     const auto it = deprecatedNameToName.find(converter_name);
     if (it != deprecatedNameToName.cend()) {
@@ -171,6 +174,8 @@ BlobToMetaConverter::Ptr BlobToMetaConverter::create(Initializer initializer, Co
             return BlobToMetaConverter::Ptr(new LabelConverter(std::move(initializer)));
         else if (converter_name == TextConverter::getName())
             return BlobToMetaConverter::Ptr(new TextConverter(std::move(initializer)));
+        else if (converter_name == SemanticMaskConverter::getName())
+            return BlobToMetaConverter::Ptr(new SemanticMaskConverter(std::move(initializer)));
         else
             throw std::runtime_error("Unsupported converter: " + converter_name);
     default:

@@ -17,12 +17,22 @@ else
   echo "MODELS_PATH: $MODELS_PATH"
 fi
 
-MODEL=${1:-"yolox_s"} # Supported values: yolo_all, yolox-tiny, yolox_s, yolov7, yolov8s, yolov9c
+MODEL=${1:-"yolox_s"} # Supported values: yolo_all, yolox-tiny, yolox_s, yolov7, yolov8s, yolov8n-obb, yolov8n-seg, yolov9c, yolov10s
 DEVICE=${2:-"CPU"}    # Supported values: CPU, GPU, NPU
 INPUT=${3:-"https://videos.pexels.com/video-files/1192116/1192116-sd_640_360_30fps.mp4"}
 OUTPUT=${4:-"file"}   # Supported values: file, display, fps, json, display-and-json
 
 cd "$(dirname "$0")"
+
+if [[ "$MODEL" == "yolov10s" ]] && [[ "$DEVICE" == "NPU" ]]; then
+    echo "Error - No support of Yolov10 for NPU."
+    exit
+fi
+
+IE_CONFIG=""
+if [[ "$MODEL" == "yolov10s" ]] && [[ "$DEVICE" == "GPU" ]]; then
+  IE_CONFIG=" ie-config=GPU_DISABLE_WINOGRAD_CONVOLUTION=YES "
+fi
 
 declare -A MODEL_PROC_FILES=(
   ["yolox-tiny"]="../../model_proc/public/yolo-x.json"
@@ -33,6 +43,8 @@ declare -A MODEL_PROC_FILES=(
   ["yolov8s"]="../../model_proc/public/yolo-v8.json"
   ["yolov9c"]="../../model_proc/public/yolo-v8.json"
   ["yolov8n-obb"]=""
+  ["yolov8n-seg"]=""
+  ["yolov10s"]=""
 )
 
 if ! [[ "${!MODEL_PROC_FILES[*]}" =~ $MODEL ]]; then
@@ -73,7 +85,15 @@ fi
 if [[ "$OUTPUT" == "file" ]]; then
   FILE=$(basename "${INPUT%.*}")
   rm -f "${FILE}_${DEVICE}.mp4"
-  SINK_ELEMENT="gvawatermark ! videoconvertscale ! gvafpscounter ! vah264enc ! h264parse ! mp4mux ! filesink location=${FILE}_${DEVICE}.mp4"
+  if [[ $(gst-inspect-1.0 va | grep vah264enc) ]]; then
+    ENCODER="vah264enc"
+  elif [[ $(gst-inspect-1.0 va | grep vah264lpenc) ]]; then
+    ENCODER="vah264lpenc"
+  else
+    echo "Error - VA-API H.264 encoder not found."
+    exit
+  fi
+  SINK_ELEMENT="gvawatermark ! videoconvertscale ! gvafpscounter ! ${ENCODER} ! h264parse ! mp4mux ! filesink location=${FILE}_${DEVICE}.mp4"
 elif [[ "$OUTPUT" == "display" ]] || [[ -z $OUTPUT ]]; then
   SINK_ELEMENT="gvawatermark ! videoconvertscale ! gvafpscounter ! autovideosink sync=false"
 elif [[ "$OUTPUT" == "fps" ]]; then
@@ -95,7 +115,7 @@ gvadetect model=$MODEL_PATH"
 if [[ -n "$MODEL_PROC" ]]; then
   PIPELINE="$PIPELINE model-proc=$MODEL_PROC"
 fi
-PIPELINE="$PIPELINE device=$DEVICE pre-process-backend=$PREPROC_BACKEND ! queue ! \
+PIPELINE="$PIPELINE device=$DEVICE pre-process-backend=$PREPROC_BACKEND $IE_CONFIG ! queue ! \
 $SINK_ELEMENT"
 
 echo "${PIPELINE}"

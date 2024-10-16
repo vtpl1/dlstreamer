@@ -484,17 +484,21 @@ bool Impl::render(GstBuffer *buffer) {
 void Impl::preparePrimsForRoi(GVA::RegionOfInterest &roi, std::vector<render::Prim> &prims) const {
     size_t color_index = roi.label_id();
 
-    auto rect = roi.normalized_rect();
-    if (rect.w && rect.h) {
-        rect.x *= _vinfo->width;
-        rect.y *= _vinfo->height;
-        rect.w *= _vinfo->width;
-        rect.h *= _vinfo->height;
-    } else {
-        auto rect_u32 = roi.rect();
-        rect = {safe_convert<double>(rect_u32.x), safe_convert<double>(rect_u32.y), safe_convert<double>(rect_u32.w),
-                safe_convert<double>(rect_u32.h)};
-    }
+    auto rect_u32 = roi.rect();
+    GVA::Rect<double> rect = {safe_convert<double>(rect_u32.x), safe_convert<double>(rect_u32.y),
+                              safe_convert<double>(rect_u32.w), safe_convert<double>(rect_u32.h)};
+
+    // auto rect = roi.normalized_rect(_vinfo->width, _vinfo->height);
+    // if (rect.w && rect.h) {
+    //     rect.x *= _vinfo->width;
+    //     rect.y *= _vinfo->height;
+    //     rect.w *= _vinfo->width;
+    //     rect.h *= _vinfo->height;
+    // } else {
+    //     auto rect_u32 = roi.rect();
+    //     rect = {safe_convert<double>(rect_u32.x), safe_convert<double>(rect_u32.y), safe_convert<double>(rect_u32.w),
+    //             safe_convert<double>(rect_u32.h)};
+    // }
     clip_rect(rect.x, rect.y, rect.w, rect.h, _vinfo);
 
     std::ostringstream text;
@@ -573,7 +577,7 @@ void Impl::preparePrimsForTensor(const GVA::Tensor &tensor, GVA::Rect<double> re
 
         if (!_obb) {
             // overlay mask on top of image pixels
-            prims.emplace_back(render::Mask(mask, mask_size, color, box));
+            prims.emplace_back(render::InstanceSegmantationMask(mask, mask_size, color, box));
         } else {
             // resize mask to non-rotated bounding box and convert to binary
             cv::Mat mask_resized, mask_converted;
@@ -591,6 +595,15 @@ void Impl::preparePrimsForTensor(const GVA::Tensor &tensor, GVA::Rect<double> re
             for (int i = 0; i < 4; i++)
                 prims.emplace_back(render::Line(vertices2f[i], vertices2f[(i + 1) % 4], color, _thickness));
         }
+    }
+
+    if (tensor.format() == "semantic_mask") {
+        assert(tensor.precision() == GVA::Tensor::Precision::I64);
+        std::vector<int64_t> mask = tensor.data<int64_t>();
+        std::vector<guint> dims = tensor.dims();
+        const cv::Size &mask_size{int(dims[1]), int(dims[2])};
+        cv::Rect2f box(rect.x, rect.y, rect.w, rect.h);
+        prims.emplace_back(render::SemanticSegmantationMask(mask, mask_size, box));
     }
 
     preparePrimsForKeypoints(tensor, rect, prims);
