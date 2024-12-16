@@ -18,10 +18,14 @@ SUPPORTED_MODELS=(
   "yolov5su"
   "yolov7"
   "yolov8s"
-  "yolov9c"
-  "yolov10s"
   "yolov8n-obb"
   "yolov8n-seg"
+  "yolov9c"
+  "yolov10s"
+  "yolo11s"
+  "yolo11s-obb"
+  "yolo11s-seg"
+  "yolo11s-pose"
   "centerface"
   "hsemotion"
   "deeplabv3"
@@ -39,6 +43,18 @@ if [ -z "$MODELS_PATH" ]; then
   exit 1
 fi
 set -u  # Re-enable nounset option
+
+version=$(pip freeze | grep openvino== | cut -f3 -d "=")
+if [[ "$version" < "2024.5.0" ]]; then
+  pip install openvino --upgrade
+fi
+
+if [[ "$MODEL" =~ yolo.* ]]; then
+  version=$(pip freeze | grep ultralytics== | cut -f3 -d "=")
+  if [[ "$version" < "8.3.24" ]]; then
+    pip install ultralytics --upgrade
+  fi
+fi
 
 echo Downloading models to folder "$MODELS_PATH"
 
@@ -201,21 +217,20 @@ if [ "$MODEL" == "yolov8s" ] || [ "$MODEL" == "yolo_all" ] || [ "$MODEL" == "all
     echo "Downloading and converting: ${MODEL_PATH}"
     mkdir -p "$MODELS_PATH"/public/"$MODEL_NAME"
     cd "$MODELS_PATH"/public/"$MODEL_NAME"
-    python3 - <<EOF
+    python3 - <<EOF $MODEL_NAME
 from ultralytics import YOLO
-model = YOLO("yolov8s.pt")
+import openvino, sys, shutil
+model = YOLO(sys.argv[1] + '.pt')
 model.info()
-model.export(format='openvino')  # creates 'yolov8s_openvino_model/'
+converted_path = model.export(format='openvino')
+converted_model = converted_path + '/' + sys.argv[1] +'.xml'
+core = openvino.Core()
+ov_model = core.read_model(model=converted_model)
+ov_model.set_rt_info("YOLOv8", ['model_info', 'model_type'])
+openvino.save_model(ov_model, './FP32/' + sys.argv[1] +'.xml', compress_to_fp16=False)
+openvino.save_model(ov_model, './FP16/' + sys.argv[1] +'.xml', compress_to_fp16=True)
+shutil.rmtree(converted_path)
 EOF
-    mv ./"${MODEL_NAME}"_openvino_model ./FP32
-    python3 - <<EOF
-from ultralytics import YOLO
-model = YOLO("yolov8s.pt")
-model.info()
-model.export(format='openvino', half=True)  # creates 'yolov8s_openvino_model/'
-EOF
-    mv ./"${MODEL_NAME}"_openvino_model ./FP16
-    cd ../..
   fi
 fi
 
@@ -276,23 +291,23 @@ if [ "$MODEL" == "yolov9c" ] || [ "$MODEL" == "yolo_all" ] || [ "$MODEL" == "all
     echo "Downloading and converting: ${MODEL_PATH}"
     mkdir -p "$MODELS_PATH"/public/"$MODEL_NAME"
     cd "$MODELS_PATH"/public/"$MODEL_NAME"
-    python3 - <<EOF
+    python3 - <<EOF $MODEL_NAME
 from ultralytics import YOLO
-model = YOLO("yolov9c.pt")
+import openvino, sys, shutil
+model = YOLO(sys.argv[1] + '.pt')
 model.info()
-model.export(format='openvino')  # creates 'yolov9c_openvino_model/'
+converted_path = model.export(format='openvino')
+converted_model = converted_path + '/' + sys.argv[1] +'.xml'
+core = openvino.Core()
+ov_model = core.read_model(model=converted_model)
+ov_model.set_rt_info("YOLOv8", ['model_info', 'model_type'])
+openvino.save_model(ov_model, './FP32/' + sys.argv[1] +'.xml', compress_to_fp16=False)
+openvino.save_model(ov_model, './FP16/' + sys.argv[1] +'.xml', compress_to_fp16=True)
+shutil.rmtree(converted_path)
 EOF
-    mv "${MODEL_NAME}"_openvino_model FP32/
-    python3 - <<EOF
-from ultralytics import YOLO
-model = YOLO("yolov9c.pt")
-model.info()
-model.export(format='openvino', half=True)  # creates 'yolov9c_openvino_model/'
-EOF
-    mv "${MODEL_NAME}"_openvino_model FP16/
-    cd ../..
   fi
 fi
+
 
 if [ "$MODEL" == "yolov10s" ] || [ "$MODEL" == "yolo_all" ] || [ "$MODEL" == "all" ]; then
   MODEL_NAME="yolov10s"
@@ -311,6 +326,104 @@ converted_model = converted_path + '/' + sys.argv[1] +'.xml'
 core = openvino.Core()
 ov_model = core.read_model(model=converted_model)
 ov_model.set_rt_info("yolo_v10", ['model_info', 'model_type'])
+openvino.save_model(ov_model, './FP32/' + sys.argv[1] +'.xml', compress_to_fp16=False)
+openvino.save_model(ov_model, './FP16/' + sys.argv[1] +'.xml', compress_to_fp16=True)
+shutil.rmtree(converted_path)
+EOF
+  fi
+fi
+
+if [ "$MODEL" == "yolo11s" ] || [ "$MODEL" == "yolo_all" ] || [ "$MODEL" == "all" ]; then
+  MODEL_NAME="yolo11s"
+  MODEL_PATH="$MODELS_PATH/public/$MODEL_NAME/FP32/$MODEL_NAME.xml"
+  if [ ! -f "$MODEL_PATH" ]; then
+    echo "Downloading and converting: ${MODEL_PATH}"
+    mkdir -p "$MODELS_PATH"/public/"$MODEL_NAME"
+    cd "$MODELS_PATH"/public/"$MODEL_NAME"
+    python3 - <<EOF $MODEL_NAME
+from ultralytics import YOLO
+import openvino, sys, shutil
+model = YOLO(sys.argv[1] + '.pt')
+model.info()
+converted_path = model.export(format='openvino')
+converted_model = converted_path + '/' + sys.argv[1] +'.xml'
+core = openvino.Core()
+ov_model = core.read_model(model=converted_model)
+ov_model.set_rt_info("yolo_v11", ['model_info', 'model_type'])
+openvino.save_model(ov_model, './FP32/' + sys.argv[1] +'.xml', compress_to_fp16=False)
+openvino.save_model(ov_model, './FP16/' + sys.argv[1] +'.xml', compress_to_fp16=True)
+shutil.rmtree(converted_path)
+EOF
+  fi
+fi
+
+if [ "$MODEL" == "yolo11s-obb" ] || [ "$MODEL" == "yolo_all" ] || [ "$MODEL" == "all" ]; then
+  MODEL_NAME="yolo11s-obb"
+  MODEL_PATH="$MODELS_PATH/public/$MODEL_NAME/FP32/$MODEL_NAME.xml"
+  if [ ! -f "$MODEL_PATH" ]; then
+    echo "Downloading and converting: ${MODEL_PATH}"
+    mkdir -p "$MODELS_PATH"/public/"$MODEL_NAME"
+    cd "$MODELS_PATH"/public/"$MODEL_NAME"
+    python3 - <<EOF $MODEL_NAME
+from ultralytics import YOLO
+import openvino, sys, shutil
+model = YOLO(sys.argv[1] + '.pt')
+model.info()
+converted_path = model.export(format='openvino')
+converted_model = converted_path + '/' + sys.argv[1] +'.xml'
+core = openvino.Core()
+ov_model = core.read_model(model=converted_model)
+ov_model.set_rt_info("yolo_v11_obb", ['model_info', 'model_type'])
+openvino.save_model(ov_model, './FP32/' + sys.argv[1] +'.xml', compress_to_fp16=False)
+openvino.save_model(ov_model, './FP16/' + sys.argv[1] +'.xml', compress_to_fp16=True)
+shutil.rmtree(converted_path)
+EOF
+  fi
+fi
+
+if [ "$MODEL" == "yolo11s-seg" ] || [ "$MODEL" == "yolo_all" ] || [ "$MODEL" == "all" ]; then
+  MODEL_NAME="yolo11s-seg"
+  MODEL_PATH="$MODELS_PATH/public/$MODEL_NAME/FP32/$MODEL_NAME.xml"
+  if [ ! -f "$MODEL_PATH" ]; then
+    echo "Downloading and converting: ${MODEL_PATH}"
+    mkdir -p "$MODELS_PATH"/public/"$MODEL_NAME"
+    cd "$MODELS_PATH"/public/"$MODEL_NAME"
+    python3 - <<EOF $MODEL_NAME
+from ultralytics import YOLO
+import openvino, sys, shutil
+model = YOLO(sys.argv[1] + '.pt')
+model.info()
+converted_path = model.export(format='openvino')
+converted_model = converted_path + '/' + sys.argv[1] +'.xml'
+core = openvino.Core()
+ov_model = core.read_model(model=converted_model)
+ov_model.output(0).set_names({"boxes"})
+ov_model.output(1).set_names({"masks"})
+ov_model.set_rt_info("yolo_v11_seg", ['model_info', 'model_type'])
+openvino.save_model(ov_model, './FP32/' + sys.argv[1] +'.xml', compress_to_fp16=False)
+openvino.save_model(ov_model, './FP16/' + sys.argv[1] +'.xml', compress_to_fp16=True)
+shutil.rmtree(converted_path)
+EOF
+  fi
+fi
+
+if [ "$MODEL" == "yolo11s-pose" ] || [ "$MODEL" == "yolo_all" ] || [ "$MODEL" == "all" ]; then
+  MODEL_NAME="yolo11s-pose"
+  MODEL_PATH="$MODELS_PATH/public/$MODEL_NAME/FP32/$MODEL_NAME.xml"
+  if [ ! -f "$MODEL_PATH" ]; then
+    echo "Downloading and converting: ${MODEL_PATH}"
+    mkdir -p "$MODELS_PATH"/public/"$MODEL_NAME"
+    cd "$MODELS_PATH"/public/"$MODEL_NAME"
+    python3 - <<EOF $MODEL_NAME
+from ultralytics import YOLO
+import openvino, sys, shutil
+model = YOLO(sys.argv[1] + '.pt')
+model.info()
+converted_path = model.export(format='openvino')
+converted_model = converted_path + '/' + sys.argv[1] +'.xml'
+core = openvino.Core()
+ov_model = core.read_model(model=converted_model)
+ov_model.set_rt_info("yolo_v11_pose", ['model_info', 'model_type'])
 openvino.save_model(ov_model, './FP32/' + sys.argv[1] +'.xml', compress_to_fp16=False)
 openvino.save_model(ov_model, './FP16/' + sys.argv[1] +'.xml', compress_to_fp16=True)
 shutil.rmtree(converted_path)

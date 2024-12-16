@@ -26,6 +26,34 @@ GST_DEBUG_CATEGORY_STATIC(gst_json_converter_debug);
 
 namespace {
 
+#define TIMESTAMP_LENGTH_BEFORE_MICROSECONDS 23
+#define TIMESTAMP_OFFSET_POSITION 26
+#define MICROSECONDS_TO_REMOVE 3
+
+// Function to cut part of a string
+gchar* cut_microseconds(const gchar *input) {   
+    if (input == NULL) 
+        return NULL;
+
+    // Calculate the length of the new string
+    size_t new_length = strlen(input) - MICROSECONDS_TO_REMOVE; 
+
+    // Allocate memory for the new string
+    gchar *new_string = (gchar*) g_malloc(new_length + 1);
+    if (new_string == NULL) 
+        return NULL;
+    
+    // Copy the part before the microseconds
+    strncpy(new_string, input, TIMESTAMP_LENGTH_BEFORE_MICROSECONDS); // Copy up to the first three digits of the microseconds
+    new_string[TIMESTAMP_LENGTH_BEFORE_MICROSECONDS] = '\0';
+
+    // Append the time zone offset
+    strcat(new_string, input + TIMESTAMP_OFFSET_POSITION); 
+
+    return new_string;
+}
+
+
 /**
  * @return JSON object which contains parameters such as resolution, timestamp, source and tags.
  */
@@ -49,7 +77,50 @@ json get_frame_data(GstGvaMetaConvert *converter, GstBuffer *buffer) {
     if (tc_meta) {
         GstVideoTimeCode *vtc = gst_video_time_code_copy(&tc_meta->tc);
         GDateTime *frame_date_time = gst_video_time_code_to_date_time(vtc);
-        res["system_timestamp"] = g_date_time_format_iso8601(frame_date_time);
+
+        // Format the datetime to ISO string with milliseconds
+        gchar *iso_string = NULL;
+        gchar *iso_string_millisec = NULL;
+        GDateTime *utc_datetime = NULL;
+
+        if (converter->timestamp_utc) {
+            utc_datetime = g_date_time_to_utc(frame_date_time); // Convert the GDateTime object to UTC
+            if (!utc_datetime) 
+                GST_WARNING("Failed to convert datetime to UTC");
+            else {
+                g_date_time_unref(frame_date_time);
+                frame_date_time = utc_datetime;
+                // UTC mode: add 'Z' at the end
+                iso_string = g_date_time_format(frame_date_time, "%Y-%m-%dT%H:%M:%S.%fZ");
+            }
+        }
+        else 
+            // Non-UTC mode: include offset from UTC
+            iso_string = g_date_time_format(frame_date_time, "%Y-%m-%dT%H:%M:%S.%f:%z");
+
+        if (iso_string == NULL) 
+            GST_WARNING("Failed to format the datetime to ISO string");
+        else {
+
+            if (!(converter->timestamp_microseconds)) { 
+                iso_string_millisec = cut_microseconds(iso_string);
+                g_free(iso_string);
+                iso_string = iso_string_millisec; 
+            }
+
+            // Store the formatted timestamp in the result
+            res["system_timestamp"] = iso_string;
+
+            // Free the allocated resources
+            g_free(iso_string);
+        }
+        
+        if (frame_date_time) 
+            g_date_time_unref(frame_date_time);
+
+        if (vtc)
+            gst_video_time_code_free(vtc);
+
     }
     return res;
 }
@@ -64,8 +135,7 @@ json convert_roi_detection(GstGvaMetaConvert *converter, GstBuffer *buffer) {
     json res = json::array();
     GVA::VideoFrame video_frame(buffer, converter->info);
     for (GVA::RegionOfInterest &roi : video_frame.regions()) {
-        gint id = 0;
-        get_object_id(roi._meta(), &id);
+        gint id = roi.object_id();
 
         json jobject = json::object();
 
@@ -73,21 +143,23 @@ json convert_roi_detection(GstGvaMetaConvert *converter, GstBuffer *buffer) {
             jobject["tensors"] = json::array();
         }
 
-        jobject.push_back({"x", roi._meta()->x});
-        jobject.push_back({"y", roi._meta()->y});
-        jobject.push_back({"w", roi._meta()->w});
-        jobject.push_back({"h", roi._meta()->h});
+        auto rect = roi.rect();
+
+        jobject.push_back({"x", rect.x});
+        jobject.push_back({"y", rect.y});
+        jobject.push_back({"w", rect.w});
+        jobject.push_back({"h", rect.h});
         jobject.push_back({"region_id", roi.region_id()});
 
         if (id != 0)
             jobject.push_back({"id", id});
 
-        const gchar *roi_type = g_quark_to_string(roi._meta()->roi_type);
+        const std::string roi_type = roi.label();
 
-        if (roi_type) {
+        if (!roi_type.empty()) {
             jobject.push_back({"roi_type", roi_type});
         }
-        for (GList *l = roi._meta()->params; l; l = g_list_next(l)) {
+        for (GList *l = roi.get_params(); l; l = g_list_next(l)) {
 
             GstStructure *s = GST_STRUCTURE(l->data);
             const gchar *s_name = gst_structure_get_name(s);
@@ -112,9 +184,9 @@ json convert_roi_detection(GstGvaMetaConvert *converter, GstBuffer *buffer) {
                         detection.push_back({"label_id", label_id});
                     }
 
-                    const gchar *label = g_quark_to_string(roi._meta()->roi_type);
+                    const std::string label = roi.label();
 
-                    if (label) {
+                    if (!label.empty()) {
                         detection.push_back({"label", label});
                     }
                     jobject.push_back(json::object_t::value_type("detection", detection));

@@ -70,6 +70,9 @@ struct fmt::formatter<std::exception_ptr> {
     static constexpr size_t max_level = 5;
     mutable size_t level = 0;
 
+    // Fix for an AFL++ compilation issue
+    using return_type = decltype(std::declval<format_context>().out());
+
     constexpr auto parse(format_parse_context &ctx) {
         return ctx.begin();
     }
@@ -79,7 +82,7 @@ struct fmt::formatter<std::exception_ptr> {
     }
 
     template <typename T>
-    auto format_nested(const T &ex, format_context &ctx) const {
+    return_type format_nested(const T &ex, format_context &ctx) const {
         try {
             std::rethrow_if_nested(ex);
         } catch (...) {
@@ -91,7 +94,7 @@ struct fmt::formatter<std::exception_ptr> {
         return ctx.out();
     }
 
-    auto format(const std::exception_ptr &ex_ptr, format_context &ctx) const {
+    return_type format(const std::exception_ptr &ex_ptr, format_context &ctx) const {
         if (!ex_ptr)
             return fmt::format_to(ctx.out(), "<exception is nullptr>");
 
@@ -1339,7 +1342,7 @@ Image fill_image(ov::Tensor &tensor, size_t bindex) {
         throw std::out_of_range("Image index is out of range in batch blob");
     }
     auto elem_type = tensor.get_element_type();
-    size_t plane_size = image.width * image.height * elem_type.size();
+    size_t plane_size = safe_mul(size_t(safe_mul(image.width, image.height)), elem_type.size());
     size_t buffer_offset = safe_mul(safe_mul(bindex, plane_size), dims[1]);
 
     image.planes[0] = static_cast<uint8_t *>(tensor.data()) + buffer_offset;
