@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (C) 2018-2024 Intel Corporation
+ * Copyright (C) 2018-2025 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  ******************************************************************************/
@@ -129,8 +129,8 @@ struct Impl {
     void preparePrimsForKeypoints(const GVA::Tensor &tensor, GVA::Rect<double> rectangle,
                                   std::vector<render::Prim> &prims) const;
     void preparePrimsForKeypointConnections(GstStructure *s, const std::vector<float> &keypoints_data,
-                                            const std::vector<uint32_t> &dims, const GVA::Rect<double> &rectangle,
-                                            std::vector<render::Prim> &prims) const;
+                                            const std::vector<uint32_t> &dims, const std::vector<float> &confidence,
+                                            const GVA::Rect<double> &rectangle, std::vector<render::Prim> &prims) const;
 
     std::unique_ptr<Renderer> createRenderer(std::shared_ptr<ColorConverter> converter, DEVICE_SELECTOR device,
                                              InferenceBackend::MemoryType mem_type, dlstreamer::ContextPtr context);
@@ -225,8 +225,7 @@ void gst_gva_watermark_impl_finalize(GObject *object) {
 
     GST_DEBUG_OBJECT(gvawatermark, "finalize");
 
-    if (gvawatermark->impl)
-        delete gvawatermark->impl;
+    gvawatermark->impl.reset();
 
     g_free(gvawatermark->device);
     gvawatermark->device = nullptr;
@@ -298,10 +297,7 @@ static gboolean gst_gva_watermark_impl_set_caps(GstBaseTransform *trans, GstCaps
         }
     }
 
-    if (gvawatermark->impl) {
-        delete gvawatermark->impl;
-        gvawatermark->impl = nullptr;
-    }
+    gvawatermark->impl.reset();
 
     VaApiDisplayPtr va_dpy;
     if (mem_type == MemoryType::VAAPI) {
@@ -316,7 +312,7 @@ static gboolean gst_gva_watermark_impl_set_caps(GstBaseTransform *trans, GstCaps
     }
 
     try {
-        gvawatermark->impl = new Impl(&gvawatermark->info, device, mem_type, va_dpy, gvawatermark->obb);
+        gvawatermark->impl = std::make_shared<Impl>(&gvawatermark->info, device, mem_type, va_dpy, gvawatermark->obb);
     } catch (const std::exception &e) {
         GST_ELEMENT_ERROR(gvawatermark, CORE, FAILED, ("Could not initialize"),
                           ("Cannot create watermark instance. %s", Utils::createNestedErrorMsg(e).c_str()));
@@ -545,7 +541,7 @@ void Impl::preparePrimsForTensor(const GVA::Tensor &tensor, GVA::Rect<double> re
             Color color = indexToColor(i);
             int x_lm = safe_convert<int>(rect.x + rect.w * data[2 * i]);
             int y_lm = safe_convert<int>(rect.y + rect.h * data[2 * i + 1]);
-            size_t radius = 1 + safe_convert<size_t>(_radius_multiplier * rect.w);
+            size_t radius = safe_convert<size_t>(1 + _radius_multiplier * rect.w);
             prims.emplace_back(render::Circle(cv::Point2i(x_lm, y_lm), radius, color, cv::FILLED));
         }
     }
@@ -577,7 +573,7 @@ void Impl::preparePrimsForTensor(const GVA::Tensor &tensor, GVA::Rect<double> re
 
         if (!_obb) {
             // overlay mask on top of image pixels
-            prims.emplace_back(render::Mask(mask, mask_size, color, box));
+            prims.emplace_back(render::InstanceSegmantationMask(mask, mask_size, color, box));
         } else {
             // resize mask to non-rotated bounding box and convert to binary
             cv::Mat mask_resized, mask_converted;
@@ -597,6 +593,15 @@ void Impl::preparePrimsForTensor(const GVA::Tensor &tensor, GVA::Rect<double> re
         }
     }
 
+    if (tensor.format() == "semantic_mask") {
+        assert(tensor.precision() == GVA::Tensor::Precision::I64);
+        std::vector<int64_t> mask = tensor.data<int64_t>();
+        std::vector<guint> dims = tensor.dims();
+        const cv::Size &mask_size{int(dims[1]), int(dims[2])};
+        cv::Rect2f box(rect.x, rect.y, rect.w, rect.h);
+        prims.emplace_back(render::SemanticSegmantationMask(mask, mask_size, box));
+    }
+
     preparePrimsForKeypoints(tensor, rect, prims);
 }
 
@@ -609,6 +614,7 @@ void Impl::preparePrimsForKeypoints(const GVA::Tensor &tensor, GVA::Rect<double>
         return;
 
     const auto keypoints_data = tensor.data<float>();
+    const auto confidence = tensor.get_float_vector("confidence");
 
     if (keypoints_data.empty())
         throw std::runtime_error("Keypoints array is empty.");
@@ -623,6 +629,10 @@ void Impl::preparePrimsForKeypoints(const GVA::Tensor &tensor, GVA::Rect<double>
                                "," + std::to_string(dimensions[1]) + "].");
 
     for (size_t i = 0; i < points_num; ++i) {
+
+        if ((confidence.size() > 0) && (confidence[i] < 0.5))
+            continue;
+
         float x_real = keypoints_data[point_dimension * i];
         float y_real = keypoints_data[point_dimension * i + 1];
 
@@ -631,17 +641,19 @@ void Impl::preparePrimsForKeypoints(const GVA::Tensor &tensor, GVA::Rect<double>
 
         int x_lm = safe_convert<int>(rectangle.x + rectangle.w * x_real);
         int y_lm = safe_convert<int>(rectangle.y + rectangle.h * y_real);
-        size_t radius = 1 + safe_convert<size_t>(_radius_multiplier * (rectangle.w + rectangle.h));
+        size_t radius = safe_convert<size_t>(1 + _radius_multiplier * (rectangle.w + rectangle.h));
 
         Color color = indexToColor(i);
         prims.emplace_back(render::Circle(cv::Point2i(x_lm, y_lm), radius, color, cv::FILLED));
     }
 
-    preparePrimsForKeypointConnections(tensor.gst_structure(), keypoints_data, dimensions, rectangle, prims);
+    preparePrimsForKeypointConnections(tensor.gst_structure(), keypoints_data, dimensions, confidence, rectangle,
+                                       prims);
 }
 
 void Impl::preparePrimsForKeypointConnections(GstStructure *s, const std::vector<float> &keypoints_data,
-                                              const std::vector<uint32_t> &dims, const GVA::Rect<double> &rectangle,
+                                              const std::vector<uint32_t> &dims, const std::vector<float> &confidence,
+                                              const GVA::Rect<double> &rectangle,
                                               std::vector<render::Prim> &prims) const {
     if (not(gst_structure_has_field(s, "point_names") and gst_structure_has_field(s, "point_connections")))
         return;
@@ -687,6 +699,9 @@ void Impl::preparePrimsForKeypointConnections(GstStructure *s, const std::vector
         if (index_1 == index_2)
             throw std::logic_error("Point names in connection are the same: " + std::string(point_name_1) + " / " +
                                    std::string(point_name_2));
+
+        if ((confidence.size() > 0) && ((confidence[index_1] < 0.5) || confidence[index_2] < 0.5))
+            continue;
 
         index_1 = safe_mul(point_dimension, index_1);
         index_2 = safe_mul(point_dimension, index_2);

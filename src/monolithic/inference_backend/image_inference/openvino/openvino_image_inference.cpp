@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (C) 2018-2024 Intel Corporation
+ * Copyright (C) 2018-2025 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  ******************************************************************************/
@@ -26,12 +26,15 @@
 #ifdef ENABLE_VAAPI
 #include <dlstreamer/vaapi/context.h>
 #include <openvino/runtime/intel_gpu/properties.hpp>
+#include <openvino/runtime/intel_npu/properties.hpp>
 #ifdef ENABLE_GPU_TILE_AFFINITY
 #include "vaapi_utils.h"
 #endif
 #endif
 
 #include <functional>
+#include <iterator>
+#include <regex>
 #include <stdio.h>
 #include <thread>
 
@@ -69,6 +72,9 @@ struct fmt::formatter<std::exception_ptr> {
     static constexpr size_t max_level = 5;
     mutable size_t level = 0;
 
+    // Fix for an AFL++ compilation issue
+    using return_type = decltype(std::declval<format_context>().out());
+
     constexpr auto parse(format_parse_context &ctx) {
         return ctx.begin();
     }
@@ -78,7 +84,7 @@ struct fmt::formatter<std::exception_ptr> {
     }
 
     template <typename T>
-    auto format_nested(const T &ex, format_context &ctx) const {
+    return_type format_nested(const T &ex, format_context &ctx) const {
         try {
             std::rethrow_if_nested(ex);
         } catch (...) {
@@ -90,7 +96,7 @@ struct fmt::formatter<std::exception_ptr> {
         return ctx.out();
     }
 
-    auto format(const std::exception_ptr &ex_ptr, format_context &ctx) const {
+    return_type format(const std::exception_ptr &ex_ptr, format_context &ctx) const {
         if (!ex_ptr)
             return fmt::format_to(ctx.out(), "<exception is nullptr>");
 
@@ -123,14 +129,24 @@ struct fmt::formatter<ov::AnyMap::value_type> {
 
 namespace {
 
-inline std::vector<std::string> split(const std::string &s, char delimiter) {
-    std::string token;
-    std::istringstream tokenStream(s);
-    std::vector<std::string> tokens;
-    while (std::getline(tokenStream, token, delimiter)) {
-        tokens.push_back(token);
+std::vector<std::string> split(const std::string &s, const std::string &delimiters) {
+    std::regex re("[" + delimiters + "]+");
+    std::sregex_token_iterator first{s.begin(), s.end(), re, -1}, last;
+    return {first, last};
+}
+
+std::vector<std::string> extractNumbers(const std::string &s) {
+    // Regular expression to match numbers, including negative and floating-point numbers
+    std::regex re(R"([-+]?\d*\.?\d+)");
+    std::sregex_iterator begin(s.begin(), s.end(), re);
+    std::sregex_iterator end;
+
+    std::vector<std::string> numbers;
+    for (std::sregex_iterator i = begin; i != end; ++i) {
+        numbers.push_back(i->str());
     }
-    return tokens;
+
+    return numbers;
 }
 
 const InputImageLayerDesc::Ptr
@@ -320,40 +336,30 @@ struct ConfigHelper {
         for (auto &item : params) {
             if (item.first == ov::num_streams.name()) {
                 m.emplace(item.first, ov::streams::Num(stoi(item.second)));
-            } else if (item.first == ov::hint::model_priority.name()) {
+            } else if (item.first == ov::log::level.name() || item.first == ov::cache_mode.name() ||
+                       item.first == ov::hint::enable_cpu_pinning.name() || item.first == ov::enable_profiling.name() ||
+                       item.first == ov::hint::model_priority.name() ||
+                       item.first == ov::hint::performance_mode.name() ||
+                       item.first == ov::hint::scheduling_core_type.name() ||
+                       item.first == ov::hint::execution_mode.name() ||
+                       item.first == ov::hint::enable_cpu_pinning.name() ||
+                       item.first == ov::hint::enable_hyper_threading.name() ||
+                       item.first == ov::hint::allow_auto_batching.name() ||
+                       item.first == ov::hint::inference_precision.name() ||
+                       item.first == ov::intel_gpu::enable_loop_unrolling.name() ||
+                       item.first == ov::intel_gpu::disable_winograd_convolution.name() ||
+                       item.first == ov::intel_gpu::hint::queue_throttle.name() ||
+                       item.first == ov::intel_gpu::hint::queue_priority.name() ||
+                       item.first == ov::intel_gpu::hint::host_task_priority.name() ||
+                       item.first == ov::intel_gpu::hint::enable_sdpa_optimization.name() ||
+                       item.first == ov::intel_npu::turbo.name()) {
                 m.emplace(item.first, item.second);
-            } else if (item.first == ov::hint::performance_mode.name()) {
-                m.emplace(item.first, item.second);
-            } else if (item.first == ov::hint::scheduling_core_type.name()) {
-                m.emplace(item.first, item.second);
-            } else if (item.first == ov::hint::enable_cpu_pinning.name()) {
-                m.emplace(item.first, bool(stoi(item.second)));
-            } else if (item.first == ov::hint::enable_hyper_threading.name()) {
-                m.emplace(item.first, bool(stoi(item.second)));
-            } else if (item.first == ov::hint::num_requests.name()) {
+            } else if (item.first == ov::optimal_batch_size.name() || item.first == ov::max_batch_size.name() ||
+                       item.first == ov::auto_batch_timeout.name() || item.first == ov::inference_num_threads.name() ||
+                       item.first == ov::compilation_num_threads.name() ||
+                       item.first == ov::hint::num_requests.name() ||
+                       item.first == ov::intel_npu::compilation_mode_params.name()) {
                 m.emplace(item.first, stoi(item.second));
-            } else if (item.first == ov::hint::allow_auto_batching.name()) {
-                m.emplace(item.first, bool(stoi(item.second)));
-            } else if (item.first == ov::hint::execution_mode.name()) {
-                m.emplace(item.first, item.second);
-            } else if (item.first == ov::enable_profiling.name()) {
-                m.emplace(item.first, bool(stoi(item.second)));
-            } else if (item.first == ov::log::level.name()) {
-                m.emplace(item.first, item.second);
-            } else if (item.first == ov::cache_mode.name()) {
-                m.emplace(item.first, item.second);
-            } else if (item.first == ov::optimal_batch_size.name()) {
-                m.emplace(item.first, stoi(item.second));
-            } else if (item.first == ov::max_batch_size.name()) {
-                m.emplace(item.first, stoi(item.second));
-            } else if (item.first == ov::auto_batch_timeout.name()) {
-                m.emplace(item.first, stoi(item.second));
-            } else if (item.first == ov::inference_num_threads.name()) {
-                m.emplace(item.first, stoi(item.second));
-            } else if (item.first == ov::compilation_num_threads.name()) {
-                m.emplace(item.first, stoi(item.second));
-            } else if (item.first == ov::affinity.name()) {
-                m.emplace(item.first, item.second);
             } else {
                 throw std::runtime_error("Unsupported inference param " + item.first);
             }
@@ -541,7 +547,7 @@ class OpenVinoNewApiImpl {
                 GValue gvalue = G_VALUE_INIT;
                 g_value_init(&gvalue, GST_TYPE_ARRAY);
                 std::string labels_string = element.second.as<std::string>();
-                std::vector<std::string> labels = split(labels_string, ' ');
+                std::vector<std::string> labels = split(labels_string, ",; ");
                 for (auto &el : labels) {
                     GValue label = G_VALUE_INIT;
                     g_value_init(&label, G_TYPE_STRING);
@@ -584,28 +590,107 @@ class OpenVinoNewApiImpl {
         std::setlocale(LC_ALL, "C");
 
         for (auto &element : modelConfig) {
-            if (element.first.find("scale_values") != std::string::npos) {
+            if (element.first == "scale_values") {
+                std::vector<std::string> values = extractNumbers(element.second.as<std::string>());
+                if (values.size() == 1) {
+                    GValue gvalue = G_VALUE_INIT;
+                    g_value_init(&gvalue, G_TYPE_DOUBLE);
+                    g_value_set_double(&gvalue, element.second.as<double>());
+                    gst_structure_set_value(s, "scale", &gvalue);
+                    g_value_unset(&gvalue);
+                } else if (values.size() == 3) {
+
+                    std::vector<double> scale_values;
+                    // If there are three values, use them directly
+                    for (const std::string &valueStr : values) {
+                        scale_values.push_back(std::stod(valueStr));
+                    }
+                    // Create a GST_TYPE_ARRAY to hold the scale values
+                    GValue gvalue = G_VALUE_INIT;
+                    g_value_init(&gvalue, GST_TYPE_ARRAY);
+                    for (double scale_value : scale_values) {
+                        GValue item = G_VALUE_INIT;
+                        g_value_init(&item, G_TYPE_DOUBLE);
+                        g_value_set_double(&item, scale_value);
+                        gst_value_array_append_value(&gvalue, &item);
+                        g_value_unset(&item);
+                    }
+
+                    // Set the array in the GstStructure
+                    gst_structure_set_value(s, "std", &gvalue);
+                    g_value_unset(&gvalue);
+                } else {
+                    throw std::runtime_error("Invalid number of scale values. Expected 1 or 3 values.");
+                }
+            }
+            if (element.first == "mean_values") {
+                std::vector<std::string> values = extractNumbers(element.second.as<std::string>());
+                std::vector<double> scale_values;
+
+                if (values.size() == 3) {
+                    // If there are three values, use them directly
+                    for (const std::string &valueStr : values) {
+                        scale_values.push_back(std::stod(valueStr));
+                    }
+                } else {
+                    throw std::runtime_error("Invalid number of mean values. Expected 3 values.");
+                }
+
+                // Create a GST_TYPE_ARRAY to hold the scale values
                 GValue gvalue = G_VALUE_INIT;
-                g_value_init(&gvalue, G_TYPE_DOUBLE);
-                g_value_set_double(&gvalue, element.second.as<double>());
-                gst_structure_set_value(s, "scale", &gvalue);
+                g_value_init(&gvalue, GST_TYPE_ARRAY);
+                for (double scale_value : scale_values) {
+                    GValue item = G_VALUE_INIT;
+                    g_value_init(&item, G_TYPE_DOUBLE);
+                    g_value_set_double(&item, scale_value);
+                    gst_value_array_append_value(&gvalue, &item);
+                    g_value_unset(&item);
+                }
+
+                // Set the array in the GstStructure
+                gst_structure_set_value(s, "mean", &gvalue);
                 g_value_unset(&gvalue);
             }
-            if ((element.first.find("resize_type") != std::string::npos) &&
-                (element.second.as<std::string>().find("fit_to_window_letterbox") != std::string::npos)) {
+            if ((element.first == "resize_type") && (element.second.as<std::string>() == "fit_to_window_letterbox")) {
                 GValue gvalue = G_VALUE_INIT;
                 g_value_init(&gvalue, G_TYPE_STRING);
                 g_value_set_string(&gvalue, "aspect-ratio");
                 gst_structure_set_value(s, "resize", &gvalue);
                 g_value_unset(&gvalue);
             }
-            if ((element.first.find("reverse_input_channels") != std::string::npos) &&
-                (element.second.as<std::string>().find("YES") != std::string::npos)) {
+            if ((element.first == "resize_type") && (element.second.as<std::string>() == "standard")) {
+                GValue gvalue = G_VALUE_INIT;
+                g_value_init(&gvalue, G_TYPE_STRING);
+                g_value_set_string(&gvalue, "no-aspect-ratio");
+                gst_structure_set_value(s, "resize", &gvalue);
+                g_value_unset(&gvalue);
+            }
+            if ((element.first == "resize_type") && (element.second.as<std::string>() == "fit_to_window")) {
+                GValue gvalue = G_VALUE_INIT;
+                g_value_init(&gvalue, G_TYPE_STRING);
+                g_value_set_string(&gvalue, "aspect-ratio-pad");
+                gst_structure_set_value(s, "resize", &gvalue);
+                g_value_unset(&gvalue);
+            }
+            if ((element.first == "resize_type") && (element.second.as<std::string>() == "crop")) {
+                GValue gvalue = G_VALUE_INIT;
+                g_value_init(&gvalue, G_TYPE_STRING);
+                g_value_set_string(&gvalue, "central-resize");
+                gst_structure_set_value(s, "crop", &gvalue);
+                g_value_unset(&gvalue);
+            }
+            if ((element.first == "reverse_input_channels") && (element.second.as<std::string>() == "True")) {
+                GValue gvalue = G_VALUE_INIT;
+                g_value_init(&gvalue, G_TYPE_STRING);
+                g_value_set_string(&gvalue, "RGB");
+                gst_structure_set_value(s, "color_space", &gvalue);
+                g_value_unset(&gvalue);
+            }
+            if ((element.first == "reverse_input_channels") && (element.second.as<std::string>() == "YES")) {
                 GValue gvalue = G_VALUE_INIT;
                 g_value_init(&gvalue, G_TYPE_INT);
                 g_value_set_int(&gvalue, gint(true));
                 gst_structure_set_value(s, "reverse_input_channels", &gvalue);
-                g_value_unset(&gvalue);
             }
         }
 
@@ -1161,7 +1246,7 @@ class OpenVinoNewApiImpl {
 void OpenVINOImageInference::SetCompletionCallback(std::shared_ptr<BatchRequest> &batch_request) {
     assert(batch_request && "Batch request is null");
 
-    auto cb = [=](std::exception_ptr ex) {
+    auto cb = [=, this](std::exception_ptr ex) {
         ITT_TASK("completion_callback_lambda_new");
 
         try {
@@ -1349,7 +1434,7 @@ Image fill_image(ov::Tensor &tensor, size_t bindex) {
         throw std::out_of_range("Image index is out of range in batch blob");
     }
     auto elem_type = tensor.get_element_type();
-    size_t plane_size = image.width * image.height * elem_type.size();
+    size_t plane_size = safe_mul(size_t(safe_mul(image.width, image.height)), elem_type.size());
     size_t buffer_offset = safe_mul(safe_mul(bindex, plane_size), dims[1]);
 
     image.planes[0] = static_cast<uint8_t *>(tensor.data()) + buffer_offset;

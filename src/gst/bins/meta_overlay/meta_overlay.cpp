@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (C) 2022-2024 Intel Corporation
+ * Copyright (C) 2022-2025 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  ******************************************************************************/
@@ -74,7 +74,7 @@ class CPUPipeBuilder : public PipeBuilder {
         return elem::videoconvert;
     }
     std::string get_process() const override {
-        return elem::opencv_meta_overlay;
+        return std::string(elem::videoconvert) + elem::pipe_separator + elem::opencv_meta_overlay;
     }
     std::string get_postproc() const override {
         std::string res = elem::videoconvert;
@@ -105,7 +105,7 @@ class GPUPipeBuilder : public PipeBuilder {
             return std::string(elem::videoconvert);
     }
     std::string get_process() const override {
-        return std::string(elem::opencv_meta_overlay);
+        return std::string(elem::videoconvert) + elem::pipe_separator + elem::opencv_meta_overlay;
     }
     std::string get_postproc() const override {
         if (_vapostproc_avaliable)
@@ -119,8 +119,8 @@ class GPUPipeBuilder : public PipeBuilder {
 
 class MetaOverlayBinPrivate {
   public:
-    static MetaOverlayBinPrivate *unpack(gpointer base) {
-        g_assert(GST_META_OVERLAY_BIN(base)->impl);
+    static std::shared_ptr<MetaOverlayBinPrivate> unpack(gpointer base) {
+        g_assert(GST_META_OVERLAY_BIN(base)->impl != nullptr);
         return GST_META_OVERLAY_BIN(base)->impl;
     }
 
@@ -205,15 +205,12 @@ class MetaOverlayBinPrivate {
 };
 
 static void meta_overlay_bin_init(GstMetaOverlayBin *self) {
-    self->impl = new MetaOverlayBinPrivate(self, &self->process_bin);
+    self->impl = std::make_shared<MetaOverlayBinPrivate>(self, &self->process_bin);
 }
 
 static void meta_overlay_bin_finalize(GObject *object) {
     GstMetaOverlayBin *self = GST_META_OVERLAY_BIN(object);
-    if (self->impl) {
-        delete self->impl;
-        self->impl = nullptr;
-    }
+    self->impl.reset();
 
     G_OBJECT_CLASS(meta_overlay_bin_parent_class)->finalize(object);
 }

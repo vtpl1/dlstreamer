@@ -1,13 +1,11 @@
 #!/bin/bash
 # ==============================================================================
-# Copyright (C) 2021-2024 Intel Corporation
+# Copyright (C) 2021-2025 Intel Corporation
 #
 # SPDX-License-Identifier: MIT
 # ==============================================================================
 
 set -euo pipefail
-
-cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")"
 
 if [ -z "${MODELS_PATH:-}" ]; then
   echo "Error: MODELS_PATH is not set." >&2
@@ -33,7 +31,7 @@ else
   SOURCE_ELEMENT="filesrc location=${INPUT}"
 fi
 
-DECODE_ELEMENT="! decodebin !"
+DECODE_ELEMENT="! decodebin3 !"
 PREPROC_BACKEND="ie"
 if [[ "$DEVICE" == "GPU" ]] || [[ "$DEVICE" == "NPU" ]]; then
   DECODE_ELEMENT+=" vapostproc ! video/x-raw(memory:VAMemory) !"
@@ -42,7 +40,7 @@ fi
 
 if [[ "$OUTPUT" == "file" ]]; then
   FILE=$(basename "${INPUT%.*}")
-  rm -f "${FILE}_${DEVICE}.mp4"
+  rm -f "gvaattachroi_${FILE}_${DEVICE}.mp4"
   if gst-inspect-1.0 va | grep -q vah264enc; then
     ENCODER="vah264enc"
   elif gst-inspect-1.0 va | grep -q vah264lpenc; then
@@ -51,7 +49,7 @@ if [[ "$OUTPUT" == "file" ]]; then
     echo "Error - VA-API H.264 encoder not found."
     exit
   fi
-  SINK_ELEMENT="gvawatermark ! videoconvertscale ! gvafpscounter ! ${ENCODER} ! h264parse ! mp4mux ! filesink location=${FILE}_${DEVICE}.mp4"
+  SINK_ELEMENT="gvawatermark ! gvafpscounter ! ${ENCODER} ! h264parse ! mp4mux ! filesink location=gvaattachroi_${FILE}_${DEVICE}.mp4"
 elif [[ "$OUTPUT" == "display" ]] || [[ -z $OUTPUT ]]; then
   SINK_ELEMENT="gvawatermark ! videoconvertscale ! gvafpscounter ! autovideosink sync=false"
 elif [[ "$OUTPUT" == "fps" ]]; then
@@ -72,7 +70,9 @@ ROI_ELEMENT="gvaattachroi"
 if [[ -n "$ROI_COORDS" ]]; then
   ROI_ELEMENT="$ROI_ELEMENT roi=$ROI_COORDS !"
 else
-  ROI_ELEMENT="$ROI_ELEMENT mode=1 file-path=roi_list.json !"
+  SCRIPT_DIR="$(dirname "$(realpath "${BASH_SOURCE[0]}")")"
+  ROI_FILE_PATH=$SCRIPT_DIR/roi_list.json
+  ROI_ELEMENT="$ROI_ELEMENT mode=1 file-path=$ROI_FILE_PATH !"
 fi
 
 PIPELINE="gst-launch-1.0 $SOURCE_ELEMENT $DECODE_ELEMENT \

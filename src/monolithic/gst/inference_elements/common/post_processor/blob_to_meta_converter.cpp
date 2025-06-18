@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (C) 2021-2024 Intel Corporation
+ * Copyright (C) 2021-2025 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  ******************************************************************************/
@@ -13,11 +13,13 @@
 #include "converters/to_roi/yolo_v2.h"
 #include "converters/to_roi/yolo_v3.h"
 #include "converters/to_roi/yolo_v8.h"
+#include "converters/to_tensor/clip_token_converter.h"
 #include "converters/to_tensor/keypoints_3d.h"
 #include "converters/to_tensor/keypoints_hrnet.h"
 #include "converters/to_tensor/keypoints_openpose.h"
 #include "converters/to_tensor/label.h"
 #include "converters/to_tensor/raw_data_copy.h"
+#include "converters/to_tensor/semantic_mask.h"
 #include "converters/to_tensor/text.h"
 
 #include "gva_base_inference.h"
@@ -153,7 +155,9 @@ BlobToMetaConverter::Ptr BlobToMetaConverter::create(Initializer initializer, Co
     switch (converter_type) {
     case ConverterType::RAW:
         if (converter_name == RawDataCopyConverter::getName())
-            return BlobToMetaConverter::Ptr(new RawDataCopyConverter(std::move(initializer)));
+            return std::make_unique<RawDataCopyConverter>(std::move(initializer));
+        else if (converter_name == CLIPTokenConverter::getName())
+            return BlobToMetaConverter::Ptr(new CLIPTokenConverter(std::move(initializer)));
         else
             throw std::runtime_error("Unsupported converter '" + converter_name + "' for type RAW");
         break;
@@ -161,18 +165,20 @@ BlobToMetaConverter::Ptr BlobToMetaConverter::create(Initializer initializer, Co
         return BlobToROIConverter::create(std::move(initializer), converter_name);
     case ConverterType::TO_TENSOR:
         if (converter_name == RawDataCopyConverter::getName())
-            return BlobToMetaConverter::Ptr(new RawDataCopyConverter(std::move(initializer)));
+            return std::make_unique<RawDataCopyConverter>(std::move(initializer));
         else if (converter_name == KeypointsHRnetConverter::getName())
-            return BlobToMetaConverter::Ptr(new KeypointsHRnetConverter(std::move(initializer)));
+            return std::make_unique<KeypointsHRnetConverter>(std::move(initializer));
         else if (converter_name == Keypoints3DConverter::getName())
-            return BlobToMetaConverter::Ptr(new Keypoints3DConverter(std::move(initializer)));
+            return std::make_unique<Keypoints3DConverter>(std::move(initializer));
         else if (converter_name == KeypointsOpenPoseConverter::getName()) {
             auto keypoints_number = getKeypointsNumber(tensor.get());
-            return BlobToMetaConverter::Ptr(new KeypointsOpenPoseConverter(std::move(initializer), keypoints_number));
+            return std::make_unique<KeypointsOpenPoseConverter>(std::move(initializer), keypoints_number);
         } else if (converter_name == LabelConverter::getName())
-            return BlobToMetaConverter::Ptr(new LabelConverter(std::move(initializer)));
+            return std::make_unique<LabelConverter>(std::move(initializer));
         else if (converter_name == TextConverter::getName())
-            return BlobToMetaConverter::Ptr(new TextConverter(std::move(initializer)));
+            return std::make_unique<TextConverter>(std::move(initializer));
+        else if (converter_name == SemanticMaskConverter::getName())
+            return std::make_unique<SemanticMaskConverter>(std::move(initializer));
         else
             throw std::runtime_error("Unsupported converter: " + converter_name);
     default:

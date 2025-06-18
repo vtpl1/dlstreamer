@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (C) 2018-2024 Intel Corporation
+ * Copyright (C) 2018-2025 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  ******************************************************************************/
@@ -7,6 +7,7 @@
 #include "inference_impl.h"
 
 #include "common/post_processor.h"
+#include "common/post_processor/post_proc_common.h"
 #include "common/pre_processor_info_parser.hpp"
 #include "common/pre_processors.h"
 #include "config.h"
@@ -27,8 +28,9 @@
 #include <assert.h>
 #include <cmath>
 #include <cstring>
+#include <dlstreamer/gst/metadata/objectdetectionmtdext.h>
 #include <exception>
-#include <gst/allocators/allocators.h>
+#include <gst/analytics/analytics.h>
 #include <map>
 #include <memory>
 #include <openvino/runtime/properties.hpp>
@@ -46,6 +48,8 @@ using namespace std::placeholders;
 using namespace InferenceBackend;
 
 namespace {
+
+const int DEFAULT_GPU_DRM_ID = 128; // -> /dev/dri/renderD128
 
 inline std::shared_ptr<Allocator> CreateAllocator(const char *const allocator_name) {
     std::shared_ptr<Allocator> allocator;
@@ -102,7 +106,7 @@ uint32_t GetOptimalBatchSize(const char *device) {
     uint32_t batch_size = 1;
     // if the device has the format GPU.x we assume that these are discrete graphics and choose larger batch
     if (device and std::string(device).find("GPU.") != std::string::npos)
-        batch_size = 64;
+        batch_size = 8;
     return batch_size;
 }
 
@@ -452,14 +456,12 @@ void ApplyImageBoundaries(std::shared_ptr<InferenceBackend::Image> &image, GstVi
                                                                                          : raw_coordinates.h;
 }
 
-void UpdateClassificationHistory(GstVideoRegionOfInterestMeta *meta, GvaBaseInference *gva_base_inference,
+void UpdateClassificationHistory(gint meta_id, GvaBaseInference *gva_base_inference,
                                  const GstStructure *classification_result) {
     if (gva_base_inference->type != GST_GVA_CLASSIFY_TYPE)
         return;
 
     GstGvaClassify *gvaclassify = GST_GVA_CLASSIFY(gva_base_inference);
-    gint meta_id = 0;
-    get_object_id(meta, &meta_id);
     if (gvaclassify->reclassify_interval != 1 and meta_id > 0)
         gvaclassify->classification_history->UpdateROIParams(meta_id, classification_result);
 }
@@ -519,23 +521,87 @@ MemoryType GetMemoryType(MemoryType input_image_memory_type, ImagePreprocessorTy
     return type;
 }
 
+int getGPURenderDevId(GvaBaseInference *gva_base_inference) {
+    int gpuRenderDevId = 0;
+
+    if (gva_base_inference->caps_feature == VA_MEMORY_CAPS_FEATURE ||
+        gva_base_inference->caps_feature == VA_SURFACE_CAPS_FEATURE) {
+
+        GstContext *gstCtxLcl = nullptr;
+        const GstStructure *gstStrLcl = nullptr;
+        GstQuery *gstQueryLcl = gst_query_new_context(
+            gva_base_inference->caps_feature == VA_MEMORY_CAPS_FEATURE ? "gst.va.display.handle" : "gst.vaapi.Display");
+
+        if (gst_pad_peer_query(gva_base_inference->base_transform.sinkpad, gstQueryLcl)) {
+            // Get GST context to retrieve elements data
+            gst_query_parse_context(gstQueryLcl, &gstCtxLcl);
+
+            // Get GST structure of specific element
+            gstStrLcl = gst_context_get_structure(gstCtxLcl);
+
+            // Convert GST structure into string and read field 'path' to get renderDxxx device
+            gchar *structure_str = gst_structure_to_string(gstStrLcl);
+            GVA_INFO("structure_str: %s ", structure_str);
+            if (gst_structure_has_field(gstStrLcl, "path")) {
+                const gchar *_path = gst_structure_get_string(gstStrLcl, "path");
+                std::string _str_path(_path);
+                std::regex digit_regex("\\d+");
+                std::smatch match;
+                if (std::regex_search(_str_path, match, digit_regex)) {
+                    std::string digit_str = match.str();
+                    gpuRenderDevId = std::stoi(digit_str);
+                }
+                GVA_INFO("GPU Render Device Id : renderD%d", gpuRenderDevId);
+                gpuRenderDevId = gpuRenderDevId - DEFAULT_GPU_DRM_ID;
+            }
+        }
+        gst_query_unref(gstQueryLcl);
+    }
+    return gpuRenderDevId;
+}
+
+bool canReuseSharedVADispCtx(GvaBaseInference *gva_base_inference) {
+    const std::string device(gva_base_inference->device);
+
+    if (device.find("GPU.") == device.npos && device.find("GPU") != device.npos) {
+        // GPU only i.e. all available accelerators
+        return true;
+    }
+    // Check GPU.x <--> va(renderDXXX)h264dec , va(renderDXXX)postproc
+    if (device.find("GPU.") != device.npos) {
+        uint32_t rel_dev_index = Utils::getRelativeGpuDeviceIndex(device);
+        uint32_t gpuId = getGPURenderDevId(gva_base_inference);
+        if (gpuId == rel_dev_index) {
+            // Inference GPU device matches decoding GPU device so
+            // we can reuse shared VADisplay Context.
+            return true;
+        }
+    }
+    return false;
+}
+
 dlstreamer::ContextPtr createVaDisplay(GvaBaseInference *gva_base_inference) {
     assert(gva_base_inference);
 
     auto display = gva_base_inference->priv->va_display;
+    const std::string device(gva_base_inference->device);
+
+    // Create a new VADisplay context only if the existing one i.e priv->va_display does not match
+    if (!canReuseSharedVADispCtx(gva_base_inference)) {
+        if (device.find("GPU.") != device.npos) {
+            uint32_t rel_dev_index = 0;
+            rel_dev_index = Utils::getRelativeGpuDeviceIndex(device);
+            display = vaApiCreateVaDisplay(rel_dev_index);
+
+            GVA_INFO("Using new VADisplay (%p) ", static_cast<void *>(display.get()));
+            return display;
+        }
+    }
+
     if (display) {
         GVA_INFO("Using shared VADisplay (%p) from element %s", static_cast<void *>(display.get()),
                  GST_ELEMENT_NAME(gva_base_inference));
-        return display;
     }
-
-#ifdef ENABLE_VAAPI
-    uint32_t rel_dev_index = 0;
-    const std::string device(gva_base_inference->device);
-    if (device.find("GPU") != device.npos)
-        rel_dev_index = Utils::getRelativeGpuDeviceIndex(device);
-    display = vaApiCreateVaDisplay(rel_dev_index);
-#endif
 
     return display;
 }
@@ -709,6 +775,17 @@ bool InferenceImpl::FilterObjectClass(GstVideoRegionOfInterestMeta *roi) const {
     return std::find_if(object_classes.cbegin(), object_classes.cend(), compare_quark_string) != object_classes.cend();
 }
 
+bool InferenceImpl::FilterObjectClass(GstAnalyticsODMtd roi) const {
+    if (object_classes.empty())
+        return true;
+    auto compare_quark_string = [roi](const std::string &str) {
+        GQuark label_quark = gst_analytics_od_mtd_get_obj_type(const_cast<GstAnalyticsODMtd *>(&roi));
+        const gchar *roi_type = label_quark ? g_quark_to_string(label_quark) : "";
+        return (strcmp(roi_type, str.c_str()) == 0);
+    };
+    return std::find_if(object_classes.cbegin(), object_classes.cend(), compare_quark_string) != object_classes.cend();
+}
+
 bool InferenceImpl::FilterObjectClass(const std::string &object_class) const {
     if (object_classes.empty())
         return true;
@@ -722,6 +799,15 @@ InferenceImpl::~InferenceImpl() {
 
 bool InferenceImpl::IsRoiSizeValid(const GstVideoRegionOfInterestMeta *roi_meta) {
     return roi_meta->w > 1 && roi_meta->h > 1;
+}
+
+bool InferenceImpl::IsRoiSizeValid(const GstAnalyticsODMtd roi_meta) {
+    gint x, y, w, h;
+    if (!gst_analytics_od_mtd_get_location(const_cast<GstAnalyticsODMtd *>(&roi_meta), &x, &y, &w, &h, nullptr)) {
+        std::runtime_error("Failed to get location of od meta");
+    }
+
+    return w > 1 && h > 1;
 }
 
 /**
@@ -741,8 +827,28 @@ void InferenceImpl::PushOutput() {
         }
 
         for (const std::shared_ptr<InferenceFrame> &inference_roi : (*frame).inference_rois) {
+            gint meta_id = 0;
+            if (NEW_METADATA && inference_roi->roi.id >= 0) {
+                GstAnalyticsRelationMeta *relation_meta = gst_buffer_get_analytics_relation_meta(inference_roi->buffer);
+                if (!relation_meta) {
+                    throw std::runtime_error("Failed to find relation meta");
+                }
+
+                GstAnalyticsODMtd od_mtd;
+                if (!gst_analytics_relation_meta_get_od_mtd(relation_meta, inference_roi->roi.id, &od_mtd)) {
+                    throw std::runtime_error("Failed to find od metadata");
+                }
+
+                if (!post_processing::sameRegion(&od_mtd, &inference_roi->roi)) {
+                    throw std::runtime_error("Roi and od meta are not the same region");
+                }
+
+                get_od_id(od_mtd, &meta_id);
+            } else {
+                get_object_id(&inference_roi->roi, &meta_id);
+            }
             for (const GstStructure *roi_classification : inference_roi->roi_classifications) {
-                UpdateClassificationHistory(&inference_roi->roi, (*frame).filter, roi_classification);
+                UpdateClassificationHistory(meta_id, (*frame).filter, roi_classification);
             }
         }
 
@@ -816,7 +922,7 @@ InferenceImpl::MakeInferenceResult(GvaBaseInference *gva_base_inference, Model &
 }
 
 GstFlowReturn InferenceImpl::SubmitImages(GvaBaseInference *gva_base_inference,
-                                          const std::vector<GstVideoRegionOfInterestMeta *> &metas, GstBuffer *buffer) {
+                                          const std::vector<GstVideoRegionOfInterestMeta> &metas, GstBuffer *buffer) {
     ITT_TASK(__FUNCTION__);
     try {
         if (!gva_base_inference)
@@ -835,20 +941,19 @@ GstFlowReturn InferenceImpl::SubmitImages(GvaBaseInference *gva_base_inference,
          * GST_VIDEO_FRAME_MAP_FLAG_NO_REF to avoid refcount increase.
          * CreateImage::gva_buffer_unmap::gst_video_frame_unmap also will not decrease refcount.
          */
-        InferenceBackend::ImagePtr image =
-            buf_mapper.map(buffer, GstMapFlags(GST_MAP_READ | GST_VIDEO_FRAME_MAP_FLAG_NO_REF));
+        InferenceBackend::ImagePtr image = buf_mapper.map(buffer, GstMapFlags(GST_MAP_READ | GST_MAP_FLAG_LAST));
 
         if (!image)
             throw std::invalid_argument("image is null");
 
         size_t i = 0;
-        for (const auto meta : metas) {
+        for (auto meta : metas) {
             // Workaround for CodeCoverity
             if (!image)
                 break;
 
-            ApplyImageBoundaries(image, meta, gva_base_inference->inference_region);
-            auto result = MakeInferenceResult(gva_base_inference, model, meta, image, buffer);
+            ApplyImageBoundaries(image, &meta, gva_base_inference->inference_region);
+            auto result = MakeInferenceResult(gva_base_inference, model, &meta, image, buffer);
             // Because image is a shared pointer with custom deleter which performs buffer unmapping
             // we need to manually reset it after we passed it to the last InferenceResult
             // Otherwise it may try to unmap buffer which is already pushed to downstream
@@ -858,7 +963,7 @@ GstFlowReturn InferenceImpl::SubmitImages(GvaBaseInference *gva_base_inference,
             std::map<std::string, InferenceBackend::InputLayerDesc::Ptr> input_preprocessors;
             if (!model.input_processor_info.empty() && gva_base_inference->input_prerocessors_factory)
                 input_preprocessors =
-                    gva_base_inference->input_prerocessors_factory(model.inference, model.input_processor_info, meta);
+                    gva_base_inference->input_prerocessors_factory(model.inference, model.input_processor_info, &meta);
             model.inference->SubmitImage(std::move(result), input_preprocessors);
         }
     } catch (const std::exception &e) {
@@ -903,20 +1008,62 @@ GstFlowReturn InferenceImpl::TransformFrameIp(GvaBaseInference *gva_base_inferen
     }
 
     /* Collect all ROI metas into std::vector */
-    std::vector<GstVideoRegionOfInterestMeta *> metas;
+    std::vector<GstVideoRegionOfInterestMeta> metas;
     GstVideoRegionOfInterestMeta full_frame_meta;
     {
         ITT_TASK("InferenceImpl::TransformFrameIp collectROIMetas");
         switch (gva_base_inference->inference_region) {
         case ROI_LIST: {
             /* iterates through buffer's meta and pushes it in vector if inference needed. */
-            GstVideoRegionOfInterestMeta *meta = NULL;
             gpointer state = NULL;
-            while ((meta = GST_VIDEO_REGION_OF_INTEREST_META_ITERATE(buffer, &state))) {
-                if (!gva_base_inference->is_roi_inference_needed ||
-                    gva_base_inference->is_roi_inference_needed(gva_base_inference, gva_base_inference->frame_num,
-                                                                buffer, meta)) {
-                    metas.push_back(meta);
+            if (NEW_METADATA) {
+                GstAnalyticsRelationMeta *relation_meta = gst_buffer_get_analytics_relation_meta(buffer);
+                if (relation_meta) {
+                    GstAnalyticsODMtd od_meta;
+                    while (gst_analytics_relation_meta_iterate(relation_meta, &state,
+                                                               gst_analytics_od_mtd_get_mtd_type(), &od_meta)) {
+                        auto roi = GstVideoRegionOfInterestMeta();
+
+                        gint x;
+                        gint y;
+                        gint w;
+                        gint h;
+
+                        if (!gst_analytics_od_mtd_get_location(&od_meta, &x, &y, &w, &h, nullptr)) {
+                            throw std::runtime_error(
+                                "Error when trying to read the location of the object detection metadata");
+                        }
+
+                        roi.x = x;
+                        roi.y = y;
+                        roi.w = w;
+                        roi.h = h;
+
+                        roi.roi_type = gst_analytics_od_mtd_get_obj_type(&od_meta);
+                        roi.id = od_meta.id;
+
+                        GstAnalyticsODExtMtd od_ext_meta;
+                        if (gst_analytics_relation_meta_get_direct_related(
+                                relation_meta, od_meta.id, GST_ANALYTICS_REL_TYPE_RELATE_TO,
+                                gst_analytics_od_ext_mtd_get_mtd_type(), nullptr, &od_ext_meta)) {
+                            roi.params = gst_analytics_od_ext_mtd_get_params(&od_ext_meta);
+                        }
+
+                        if (!gva_base_inference->is_roi_inference_needed ||
+                            gva_base_inference->is_roi_inference_needed(gva_base_inference,
+                                                                        gva_base_inference->frame_num, buffer, &roi)) {
+                            metas.push_back(roi);
+                        }
+                    }
+                }
+            } else {
+                GstVideoRegionOfInterestMeta *meta = NULL;
+                while ((meta = GST_VIDEO_REGION_OF_INTEREST_META_ITERATE(buffer, &state))) {
+                    if (!gva_base_inference->is_roi_inference_needed ||
+                        gva_base_inference->is_roi_inference_needed(gva_base_inference, gva_base_inference->frame_num,
+                                                                    buffer, meta)) {
+                        metas.push_back(*meta);
+                    }
                 }
             }
             break;
@@ -928,8 +1075,9 @@ GstFlowReturn InferenceImpl::TransformFrameIp(GvaBaseInference *gva_base_inferen
             full_frame_meta.y = 0;
             full_frame_meta.w = gva_base_inference->info->width;
             full_frame_meta.h = gva_base_inference->info->height;
+            full_frame_meta.id = -1;
             if (IsRoiSizeValid(&full_frame_meta))
-                metas.push_back(&full_frame_meta);
+                metas.push_back(full_frame_meta);
             break;
         }
         default:
@@ -965,12 +1113,13 @@ GstFlowReturn InferenceImpl::TransformFrameIp(GvaBaseInference *gva_base_inferen
             return GST_FLOW_OK;
         }
 
-        // No need to unref buffer copy further
-        buf_guard.disable();
-
         InferenceImpl::OutputFrame output_frame = {
             .buffer = buffer, .inference_count = inference_count, .filter = gva_base_inference, .inference_rois = {}};
         output_frames.push_back(output_frame);
+
+        // No need to unref buffer copy further
+        buf_guard.disable();
+
         if (!inference_count) {
             return GST_BASE_TRANSFORM_FLOW_DROPPED;
         }

@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (C) 2018-2024 Intel Corporation
+ * Copyright (C) 2018-2025 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  ******************************************************************************/
@@ -12,6 +12,8 @@
 
 #pragma once
 
+#include "../metadata/gstanalyticskeypointsmtd.h"
+#include "../metadata/objectdetectionmtdext.h"
 #include "tensor.h"
 
 #include <cstdint>
@@ -69,7 +71,6 @@ class RegionOfInterest {
      * @return Bounding box coordinates of the RegionOfInterest
      */
     Rect<double> normalized_rect() {
-        assert(_gst_meta != nullptr);
         Tensor det = detection();
         return {det.get_double("x_min"), det.get_double("y_min"), det.get_double("x_max") - det.get_double("x_min"),
                 det.get_double("y_max") - det.get_double("y_min")};
@@ -80,7 +81,15 @@ class RegionOfInterest {
      * @return Bounding box rotation of the RegionOfInterest
      */
     double rotation() const {
-        return _detection ? _detection->get_double("rotation", 0.0) : 0.0;
+        if (_gst_meta) {
+            return _detection ? _detection->get_double("rotation", 0.0) : 0.0;
+        }
+
+        gdouble rotation;
+        if (!gst_analytics_od_ext_mtd_get_rotation(&_od_ext_meta, &rotation)) {
+            throw std::runtime_error("Error when trying to read the rotation of the RegionOfInterest");
+        }
+        return rotation;
     }
 
     /**
@@ -119,7 +128,9 @@ class RegionOfInterest {
      */
     int32_t object_id() const {
         if (_gst_meta) {
-            GstStructure *object_id_struct = gst_video_region_of_interest_meta_get_param(_gst_meta, "object_id");
+            GstStructure *object_id_struct = nullptr;
+            object_id_struct = gst_video_region_of_interest_meta_get_param(_gst_meta, "object_id");
+
             if (!object_id_struct)
                 return 0;
             int id = 0;
@@ -127,7 +138,20 @@ class RegionOfInterest {
             return id;
         }
 
-        // TODO - where do we use object_id?
+        GstAnalyticsTrackingMtd trk_mtd;
+        if (gst_analytics_relation_meta_get_direct_related(_od_meta.meta, _od_meta.id, GST_ANALYTICS_REL_TYPE_ANY,
+                                                           gst_analytics_tracking_mtd_get_mtd_type(), nullptr,
+                                                           &trk_mtd)) {
+            guint64 id;
+            GstClockTime tracking_first_seen, tracking_last_seen;
+            gboolean tracking_lost;
+            if (!gst_analytics_tracking_mtd_get_info(&trk_mtd, &id, &tracking_first_seen, &tracking_last_seen,
+                                                     &tracking_lost)) {
+                throw std::runtime_error("Failed to get tracking mtd info");
+            }
+
+            return id;
+        }
         return 0;
     }
 
@@ -148,7 +172,11 @@ class RegionOfInterest {
      */
     Tensor add_tensor(const std::string &name) {
         GstStructure *tensor = gst_structure_new_empty(name.c_str());
-        gst_video_region_of_interest_meta_add_param(_gst_meta, tensor);
+        if (_gst_meta) {
+            gst_video_region_of_interest_meta_add_param(_gst_meta, tensor);
+        } else {
+            gst_analytics_od_ext_mtd_add_param(&_od_ext_meta, tensor);
+        }
         _tensors.emplace_back(tensor);
         if (_tensors.back().is_detection())
             _detection = &_tensors.back();
@@ -166,7 +194,7 @@ class RegionOfInterest {
      * this method was called
      */
     Tensor detection() {
-        if (_gst_meta && !_detection) {
+        if (!_detection) {
             add_tensor("detection");
         }
         return _detection ? *_detection : nullptr;
@@ -177,7 +205,27 @@ class RegionOfInterest {
      * @return last added detection Tensor label_id if exists, otherwise 0
      */
     int label_id() const {
-        return _detection ? _detection->label_id() : 0;
+        if (_gst_meta) {
+            return _detection ? _detection->label_id() : 0;
+        }
+
+        GQuark label = gst_analytics_od_mtd_get_obj_type(const_cast<GstAnalyticsODMtd *>(&_od_meta));
+        if (label) {
+            GstAnalyticsClsMtd cls_descriptor_mtd;
+            if (!gst_analytics_relation_meta_get_direct_related(
+                    _od_meta.meta, _od_meta.id, GST_ANALYTICS_REL_TYPE_RELATE_TO, gst_analytics_cls_mtd_get_mtd_type(),
+                    nullptr, &cls_descriptor_mtd)) {
+                return 0;
+            }
+
+            gint label_id = gst_analytics_cls_mtd_get_index_by_quark(&cls_descriptor_mtd, label);
+            if (label_id < 0) {
+                throw std::runtime_error("Error when trying to read the label id of the RegionOfInterest");
+            }
+            return label_id;
+        } else {
+            return 0;
+        }
     }
 
     /**
@@ -201,7 +249,30 @@ class RegionOfInterest {
         }
     }
 
-    RegionOfInterest(GstAnalyticsODMtd meta) : _gst_meta(nullptr), _detection(nullptr), _od_meta(meta) {
+    RegionOfInterest(GstAnalyticsODMtd od_meta, GstAnalyticsODExtMtd od_ext_meta)
+        : _gst_meta(nullptr), _detection(nullptr), _od_meta(od_meta), _od_ext_meta(od_ext_meta) {
+
+        GList *params = gst_analytics_od_ext_mtd_get_params(&od_ext_meta);
+        _tensors.reserve(g_list_length(params));
+
+        for (GList *l = params; l; l = g_list_next(l)) {
+            GstStructure *s = GST_STRUCTURE(l->data);
+            if (not gst_structure_has_name(s, "object_id")) {
+                _tensors.emplace_back(s);
+                if (_tensors.back().is_detection())
+                    _detection = &_tensors.back();
+            }
+        }
+
+        // append tensors converted from metadata
+        gpointer state = NULL;
+        GstAnalyticsMtd handle;
+        while (gst_analytics_relation_meta_get_direct_related(od_meta.meta, od_meta.id, GST_ANALYTICS_REL_TYPE_CONTAIN,
+                                                              GST_ANALYTICS_MTD_TYPE_ANY, &state, &handle)) {
+            GstStructure *s = GVA::Tensor::convert_to_tensor(handle);
+            if (s != nullptr)
+                _tensors.emplace_back(s);
+        }
     }
 
     /**
@@ -231,14 +302,58 @@ class RegionOfInterest {
      * @param id ID to set
      */
     void set_object_id(int32_t id) {
-        assert(_gst_meta != nullptr);
-        GstStructure *object_id = gst_video_region_of_interest_meta_get_param(_gst_meta, "object_id");
-        if (object_id) {
-            gst_structure_set(object_id, "id", G_TYPE_INT, id, NULL);
-        } else {
-            object_id = gst_structure_new("object_id", "id", G_TYPE_INT, id, NULL);
-            gst_video_region_of_interest_meta_add_param(_gst_meta, object_id);
+        if (_gst_meta) {
+            GstStructure *object_id = gst_video_region_of_interest_meta_get_param(_gst_meta, "object_id");
+            if (object_id) {
+                gst_structure_set(object_id, "id", G_TYPE_INT, id, NULL);
+            } else {
+                object_id = gst_structure_new("object_id", "id", G_TYPE_INT, id, NULL);
+                gst_video_region_of_interest_meta_add_param(_gst_meta, object_id);
+            }
+            return;
         }
+
+        gpointer state = nullptr;
+        GstAnalyticsTrackingMtd trk_mtd;
+        while (gst_analytics_relation_meta_get_direct_related(_od_meta.meta, _od_meta.id, GST_ANALYTICS_REL_TYPE_ANY,
+                                                              gst_analytics_tracking_mtd_get_mtd_type(), &state,
+                                                              &trk_mtd)) {
+            if (!gst_analytics_relation_meta_set_relation(_od_meta.meta, GST_ANALYTICS_REL_TYPE_NONE, _od_meta.id,
+                                                          trk_mtd.id)) {
+                throw std::runtime_error("Failed to remove relation between od meta and tracking meta");
+            }
+        }
+
+        if (!gst_analytics_relation_meta_add_tracking_mtd(_od_meta.meta, id, 0, &trk_mtd)) {
+            throw std::runtime_error("Failed to add tracking metadata");
+        }
+
+        if (!gst_analytics_relation_meta_set_relation(_od_meta.meta, GST_ANALYTICS_REL_TYPE_RELATE_TO, _od_meta.id,
+                                                      trk_mtd.id)) {
+            throw std::runtime_error("Failed to set relation between od meta and tracking meta");
+        }
+    }
+
+    GList *get_params() const {
+        if (_gst_meta) {
+            return _gst_meta->params;
+        }
+        return gst_analytics_od_ext_mtd_get_params(&_od_ext_meta);
+    }
+
+    GstStructure *get_param(const char *name) const {
+        if (_gst_meta) {
+            return gst_video_region_of_interest_meta_get_param(_gst_meta, name);
+        }
+        return gst_analytics_od_ext_mtd_get_param(&_od_ext_meta, name);
+    }
+
+    void add_param(GstStructure *s) {
+        if (_gst_meta) {
+            gst_video_region_of_interest_meta_add_param(_gst_meta, s);
+            return;
+        }
+        gst_analytics_od_ext_mtd_add_param(&_od_ext_meta, s);
     }
 
     /**
@@ -252,9 +367,9 @@ class RegionOfInterest {
 
   protected:
     /**
-     * @brief GstVideoRegionOfInterestMeta containing fields filled with detection result (produced by gvadetect element
-     * in Gstreamer pipeline) and all the additional tensors, describing detection and other inference results (produced
-     * by gvainference, gvadetect, gvaclassify in Gstreamer pipeline)
+     * @brief GstVideoRegionOfInterestMeta containing fields filled with detection result (produced by gvadetect
+     * element in Gstreamer pipeline) and all the additional tensors, describing detection and other inference
+     * results (produced by gvainference, gvadetect, gvaclassify in Gstreamer pipeline)
      */
     GstVideoRegionOfInterestMeta *_gst_meta;
     /**
@@ -268,10 +383,11 @@ class RegionOfInterest {
     Tensor *_detection;
 
     /**
-     * @brief handle containing data required to use gst_analytics_od_mtd APIs, to retrieve analytics data related to
-     * that region of interest.
+     * @brief handle containing data required to use gst_analytics_od_mtd APIs, to retrieve analytics data related
+     * to that region of interest.
      */
     GstAnalyticsODMtd _od_meta;
+    GstAnalyticsODExtMtd _od_ext_meta;
 };
 
 } // namespace GVA

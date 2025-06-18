@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# Copyright (C) 2021-2024 Intel Corporation
+# Copyright (C) 2021-2025 Intel Corporation
 #
 # SPDX-License-Identifier: MIT
 # ==============================================================================
@@ -38,10 +38,10 @@ else
 fi
 
 if [[ $DEVICE == "CPU" ]]; then
-  DECODE_ELEMENT=" ! decodebin !"
+  DECODE_ELEMENT=" ! decodebin3 !"
   PREPROC_BACKEND="ie" 
 elif [[ $DEVICE == "GPU" ]] || [[ $DEVICE == "NPU" ]]; then
-  DECODE_ELEMENT="! decodebin ! vapostproc ! video/x-raw(memory:VAMemory) !"
+  DECODE_ELEMENT="! decodebin3 ! vapostproc ! video/x-raw(memory:VAMemory) !"
   PREPROC_BACKEND="va-surface-sharing"
 fi
 
@@ -57,7 +57,7 @@ fi
 
 if [[ $OUTPUT == "file" ]]; then
   FILE="$(basename ${INPUT%.*})"
-  rm -f "${FILE}_${MODEL}_${DEVICE}.mp4"
+  rm -f "geti_${FILE}_${MODEL}_${DEVICE}.mp4"
   if [[ $(gst-inspect-1.0 va | grep vah264enc) ]]; then
     ENCODER="vah264enc"
   elif [[ $(gst-inspect-1.0 va | grep vah264lpenc) ]]; then
@@ -66,9 +66,9 @@ if [[ $OUTPUT == "file" ]]; then
     echo "Error - VA-API H.264 encoder not found."
     exit
   fi
-  SINK_ELEMENT="gvawatermark${WT_OBB_ELEMENT}! videoconvertscale ! gvafpscounter ! ${ENCODER} ! h264parse ! mp4mux ! filesink location=${FILE}_${MODEL}_${DEVICE}.mp4"
+  SINK_ELEMENT="gvawatermark${WT_OBB_ELEMENT} ! gvafpscounter ! ${ENCODER} ! h264parse ! mp4mux ! filesink location=geti_${FILE}_${MODEL}_${DEVICE}.mp4"
 elif [[ $OUTPUT == "display" ]] || [[ -z $OUTPUT ]]; then
-  SINK_ELEMENT="gvawatermark${WT_OBB_ELEMENT}! videoconvertscale ! gvafpscounter ! autovideosink sync=false"
+  SINK_ELEMENT="gvawatermark${WT_OBB_ELEMENT} ! videoconvertscale ! gvafpscounter ! autovideosink sync=false"
 elif [[ $OUTPUT == "fps" ]]; then
   SINK_ELEMENT="gvafpscounter ! fakesink async=false"
 elif [[ $OUTPUT == "json" ]]; then

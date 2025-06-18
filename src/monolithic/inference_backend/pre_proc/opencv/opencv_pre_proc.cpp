@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (C) 2018-2024 Intel Corporation
+ * Copyright (C) 2018-2025 Intel Corporation
  *
  * SPDX-License-Identifier: MIT
  ******************************************************************************/
@@ -43,6 +43,24 @@ void CopyImage(const Image &src, Image &dst) {
 
 } // namespace
 
+cv::Rect centralCropROI(const cv::Mat &image) {
+    // Get the dimensions of the image
+    int height = image.rows;
+    int width = image.cols;
+
+    // Determine the size of the square crop
+    int cropSize = std::min(height, width);
+
+    // Calculate the starting and ending points for the crop
+    int startX = (width - cropSize) / 2;
+    int startY = (height - cropSize) / 2;
+
+    // Perform the crop
+    cv::Rect cropRegion(startX, startY, cropSize, cropSize);
+
+    return cropRegion;
+}
+
 cv::Mat CustomImageConvert(const cv::Mat &orig_image, const int src_color_format, const cv::Size &input_size,
                            const InputImageLayerDesc::Ptr &pre_proc_info,
                            const ImageTransformationParams::Ptr &image_transform_info) {
@@ -61,6 +79,11 @@ cv::Mat CustomImageConvert(const cv::Mat &orig_image, const int src_color_format
             fill_value = padding.fill_value;
         }
 
+        if (padding_x > std::numeric_limits<int>::max() / 2 || padding_y > std::numeric_limits<int>::max() / 2 ||
+            input_size.width < 0 || input_size.height < 0) {
+            throw std::range_error("Invalid padding or range");
+        }
+
         cv::Size input_size_except_padding(input_size.width - (padding_x * 2), input_size.height - (padding_y * 2));
 
         // Resize
@@ -77,7 +100,8 @@ cv::Mat CustomImageConvert(const cv::Mat &orig_image, const int src_color_format
             resize_scale_param_x = safe_convert<double>(input_size_except_padding.width) / orig_image.size().width;
             resize_scale_param_y = safe_convert<double>(input_size_except_padding.height) / orig_image.size().height;
 
-            if (pre_proc_info->getResizeType() == InputImageLayerDesc::Resize::ASPECT_RATIO) {
+            if ((pre_proc_info->getResizeType() == InputImageLayerDesc::Resize::ASPECT_RATIO) ||
+                (pre_proc_info->getResizeType() == InputImageLayerDesc::Resize::ASPECT_RATIO_PAD)) {
                 resize_scale_param_x = resize_scale_param_y = std::min(resize_scale_param_x, resize_scale_param_y);
             }
 
@@ -110,28 +134,36 @@ cv::Mat CustomImageConvert(const cv::Mat &orig_image, const int src_color_format
             cv::Size crop_rect_size(image_to_insert.size().width - safe_convert<int>(cropped_border_x),
                                     image_to_insert.size().height - safe_convert<int>(cropped_border_y));
             cv::Point2f top_left_rect_point;
-            switch (pre_proc_info->getCropType()) {
-            case InputImageLayerDesc::Crop::CENTRAL:
-                top_left_rect_point = cv::Point2f(cropped_border_x / 2, cropped_border_y / 2);
-                break;
-            case InputImageLayerDesc::Crop::TOP_LEFT:
-                top_left_rect_point = cv::Point2f(0, 0);
-                break;
-            case InputImageLayerDesc::Crop::TOP_RIGHT:
-                top_left_rect_point = cv::Point2f(cropped_border_x, 0);
-                break;
-            case InputImageLayerDesc::Crop::BOTTOM_LEFT:
-                top_left_rect_point = cv::Point2f(0, cropped_border_y);
-                break;
-            case InputImageLayerDesc::Crop::BOTTOM_RIGHT:
-                top_left_rect_point = cv::Point2f(cropped_border_x, cropped_border_y);
-                break;
-            default:
-                throw std::runtime_error("Unknown crop format.");
-            }
 
-            cv::Rect crop_rect(top_left_rect_point, crop_rect_size);
-            Crop(image_to_insert, crop_rect, image_transform_info);
+            if (pre_proc_info->getCropType() == InputImageLayerDesc::Crop::CENTRAL_RESIZE) {
+                cv::Rect crop_rect = centralCropROI(orig_image);
+                image_to_insert = orig_image;
+                Crop(image_to_insert, crop_rect, image_transform_info);
+                cv::resize(image_to_insert, image_to_insert, crop_rect_size, cv::INTER_CUBIC);
+            } else {
+                switch (pre_proc_info->getCropType()) {
+                case InputImageLayerDesc::Crop::CENTRAL:
+                    top_left_rect_point = cv::Point2f(cropped_border_x / 2, cropped_border_y / 2);
+                    break;
+                case InputImageLayerDesc::Crop::TOP_LEFT:
+                    top_left_rect_point = cv::Point2f(0, 0);
+                    break;
+                case InputImageLayerDesc::Crop::TOP_RIGHT:
+                    top_left_rect_point = cv::Point2f(cropped_border_x, 0);
+                    break;
+                case InputImageLayerDesc::Crop::BOTTOM_LEFT:
+                    top_left_rect_point = cv::Point2f(0, cropped_border_y);
+                    break;
+                case InputImageLayerDesc::Crop::BOTTOM_RIGHT:
+                    top_left_rect_point = cv::Point2f(cropped_border_x, cropped_border_y);
+                    break;
+                default:
+                    throw std::runtime_error("Unknown crop format.");
+                }
+
+                cv::Rect crop_rect(top_left_rect_point, crop_rect_size);
+                Crop(image_to_insert, crop_rect, image_transform_info);
+            }
         }
 
         // Color Space Conversion
@@ -182,6 +214,12 @@ cv::Mat CustomImageConvert(const cv::Mat &orig_image, const int src_color_format
 
         int shift_x = (input_size.width - image_to_insert.size().width) / 2;
         int shift_y = (input_size.height - image_to_insert.size().height) / 2;
+
+        if (pre_proc_info->getResizeType() == InputImageLayerDesc::Resize::ASPECT_RATIO_PAD) {
+            shift_x = 0;
+            shift_y = 0;
+        }
+
         cv::Rect region_to_insert(shift_x, shift_y, image_to_insert.size().width, image_to_insert.size().height);
 
         cv::Mat result(input_size, image_to_insert.type(), background_color);
@@ -240,8 +278,11 @@ void OpenCV_VPP::Convert(const Image &raw_src, Image &dst, const InputImageLayer
                 throw std::runtime_error(
                     "Formats with more than one plane could not be processed with `make_planar=false`");
             auto channels_count = GlobUtils::GetChannelsCount(dst.format);
-            cv::Mat dst_mat(safe_convert<int>(dst.height), safe_convert<int>(dst.width),
-                            CV_MAKE_TYPE(CV_8U, channels_count), dst.planes[0], dst.stride[0]);
+            if (channels_count > CV_DEPTH_MAX)
+                throw std::range_error("Number of channels exceeds OpenCV maximum (8)");
+            auto cv_type = CV_MAKE_TYPE(CV_8U, safe_convert<int>(channels_count));
+            cv::Mat dst_mat(safe_convert<int>(dst.height), safe_convert<int>(dst.width), cv_type, dst.planes[0],
+                            dst.stride[0]);
             dst_mat_image.copyTo(dst_mat);
         }
     } catch (const std::exception &e) {

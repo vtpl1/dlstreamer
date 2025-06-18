@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# Copyright (C) 2021-2024 Intel Corporation
+# Copyright (C) 2021-2025 Intel Corporation
 #
 # SPDX-License-Identifier: MIT
 # ==============================================================================
@@ -17,16 +17,22 @@ else
   echo "MODELS_PATH: $MODELS_PATH"
 fi
 
-MODEL=${1:-"yolox_s"} # Supported values: yolo_all, yolox-tiny, yolox_s, yolov7, yolov8s, yolov8n-obb, yolov8n-seg, yolov9c, yolov10s
+MODEL=${1:-"yolox_s"} # Supported values: yolo_all, yolox-tiny, yolox_s, yolov7, yolov8s, yolov8n-obb, yolov8n-seg, yolov9c, yolov10s, yolo11s, yolo11s-obb, yolo11s-seg, yolo11s-pose
 DEVICE=${2:-"CPU"}    # Supported values: CPU, GPU, NPU
 INPUT=${3:-"https://videos.pexels.com/video-files/1192116/1192116-sd_640_360_30fps.mp4"}
 OUTPUT=${4:-"file"}   # Supported values: file, display, fps, json, display-and-json
+PPBKEND=${5:-""}      # Supported values: ie, opencv, va, va-surface-sharing
 
 cd "$(dirname "$0")"
 
-if [[ "$MODEL" == "yolov10s" ]] && ([[ "$DEVICE" == "GPU" ]] || [[ "$DEVICE" == "NPU" ]]); then
-    echo "Error - No support of Yolov10 for GPU and NPU."
+if [[ "$MODEL" == "yolov10s" ]] && [[ "$DEVICE" == "NPU" ]]; then
+    echo "Error - No support of Yolov10s for NPU."
     exit
+fi
+
+IE_CONFIG=""
+if [[ "$MODEL" == "yolov10s" ]] && [[ "$DEVICE" == "GPU" ]]; then
+  IE_CONFIG=" ie-config=GPU_DISABLE_WINOGRAD_CONVOLUTION=YES "
 fi
 
 declare -A MODEL_PROC_FILES=(
@@ -35,11 +41,15 @@ declare -A MODEL_PROC_FILES=(
   ["yolov5s"]="../../model_proc/public/yolo-v7.json"
   ["yolov5su"]="../../model_proc/public/yolo-v8.json"
   ["yolov7"]="../../model_proc/public/yolo-v7.json"
-  ["yolov8s"]="../../model_proc/public/yolo-v8.json"
-  ["yolov9c"]="../../model_proc/public/yolo-v8.json"
+  ["yolov8s"]=""
+  ["yolov9c"]=""
   ["yolov8n-obb"]=""
   ["yolov8n-seg"]=""
   ["yolov10s"]=""
+  ["yolo11s"]=""
+  ["yolo11s-seg"]=""
+  ["yolo11s-obb"]=""
+  ["yolo11s-pose"]=""
 )
 
 if ! [[ "${!MODEL_PROC_FILES[*]}" =~ $MODEL ]]; then
@@ -70,16 +80,28 @@ else
   SOURCE_ELEMENT="filesrc location=${INPUT}"
 fi
 
-DECODE_ELEMENT="! decodebin !"
-PREPROC_BACKEND="ie"
-if [[ "$DEVICE" == "GPU" ]] || [[ "$DEVICE" == "NPU" ]]; then
+DECODE_ELEMENT="! decodebin3 !"
+if [[ "$DEVICE" == "GPU" ]]; then
   DECODE_ELEMENT+=" vapostproc ! video/x-raw(memory:VAMemory) !"
-  PREPROC_BACKEND="va-surface-sharing"
+fi
+
+if [[ "$PPBKEND" == "" ]]; then
+  PREPROC_BACKEND="ie"
+  if [[ "$DEVICE" == "GPU" ]]; then
+    PREPROC_BACKEND="va-surface-sharing"
+  fi
+else
+  if [[ "$PPBKEND" == "ie" ]] || [[ "$PPBKEND" == "opencv" ]] || [[ "$PPBKEND" == "va" ]] || [[ "$PPBKEND" == "va-surface-sharing" ]]; then
+    PREPROC_BACKEND=${PPBKEND}
+  else
+    echo "Error wrong value for PREPROC_BACKEND parameter. Supported values: ie | opencv | va | va-surface-sharing".
+    exit 
+  fi
 fi
 
 if [[ "$OUTPUT" == "file" ]]; then
   FILE=$(basename "${INPUT%.*}")
-  rm -f "${FILE}_${DEVICE}.mp4"
+  rm -f "yolo_${FILE}_${MODEL}_${DEVICE}.mp4"
   if [[ $(gst-inspect-1.0 va | grep vah264enc) ]]; then
     ENCODER="vah264enc"
   elif [[ $(gst-inspect-1.0 va | grep vah264lpenc) ]]; then
@@ -88,7 +110,7 @@ if [[ "$OUTPUT" == "file" ]]; then
     echo "Error - VA-API H.264 encoder not found."
     exit
   fi
-  SINK_ELEMENT="gvawatermark ! videoconvertscale ! gvafpscounter ! ${ENCODER} ! h264parse ! mp4mux ! filesink location=${FILE}_${DEVICE}.mp4"
+  SINK_ELEMENT="gvawatermark ! gvafpscounter ! ${ENCODER} ! h264parse ! mp4mux ! filesink location=yolo_${FILE}_${MODEL}_${DEVICE}.mp4"
 elif [[ "$OUTPUT" == "display" ]] || [[ -z $OUTPUT ]]; then
   SINK_ELEMENT="gvawatermark ! videoconvertscale ! gvafpscounter ! autovideosink sync=false"
 elif [[ "$OUTPUT" == "fps" ]]; then
@@ -110,7 +132,7 @@ gvadetect model=$MODEL_PATH"
 if [[ -n "$MODEL_PROC" ]]; then
   PIPELINE="$PIPELINE model-proc=$MODEL_PROC"
 fi
-PIPELINE="$PIPELINE device=$DEVICE pre-process-backend=$PREPROC_BACKEND ! queue ! \
+PIPELINE="$PIPELINE device=$DEVICE pre-process-backend=$PREPROC_BACKEND $IE_CONFIG ! queue ! \
 $SINK_ELEMENT"
 
 echo "${PIPELINE}"

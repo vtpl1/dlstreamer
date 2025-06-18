@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# Copyright (C) 2018-2024 Intel Corporation
+# Copyright (C) 2018-2025 Intel Corporation
 #
 # SPDX-License-Identifier: MIT
 # ==============================================================================
@@ -33,9 +33,21 @@ elif [[ $OUTPUT == "json" ]]; then
 elif [[ $OUTPUT == "display-and-json" ]]; then
   rm -f output.json
   SINK_ELEMENT="gvawatermark ! gvametaconvert ! gvametapublish file-format=json-lines file-path=output.json ! videoconvert ! gvafpscounter ! autovideosink sync=false"
+elif [[ $OUTPUT == "file" ]]; then
+  FILE="$(basename ${INPUT%.*})"
+  rm -f "gvapython_face_detection_and_classification_${FILE}_${DEVICE}.mp4"
+  if [[ $(gst-inspect-1.0 va | grep vah264enc) ]]; then
+    ENCODER="vah264enc"
+  elif [[ $(gst-inspect-1.0 va | grep vah264lpenc) ]]; then
+    ENCODER="vah264lpenc"
+  else
+    echo "Error - VA-API H.264 encoder not found."
+    exit
+  fi
+  SINK_ELEMENT="gvawatermark ! gvafpscounter ! ${ENCODER} ! avimux name=mux ! filesink location=gvapython_face_detection_and_classification_${FILE}_${DEVICE}.mp4"
 else
-  echo Error wrong value for SINK_ELEMENT parameter
-  echo Valid values: "display" - render to screen, "fps" - print FPS, "json" - write to output.json, "display-and-json" - render to screen and write to output.json
+  echo Error wrong value for OUTPUT parameter
+  echo Valid values: "display" - render to screen, "file" - render to file, "fps" - print FPS, "json" - write to output.json, "display-and-json" - render to screen and write to output.json
   exit
 fi
 
@@ -54,7 +66,7 @@ echo Running sample with the following parameters:
 echo GST_PLUGIN_PATH="${GST_PLUGIN_PATH}"
 
 read -r PIPELINE << EOM
-gst-launch-1.0 $SOURCE_ELEMENT ! decodebin ! gvainference model=$DETECT_MODEL_PATH device=$DEVICE ! queue ! gvapython module=$PYTHON_SCRIPT1 ! gvainference inference-region=roi-list model=$CLASS_MODEL_PATH device=$DEVICE ! queue ! gvapython module=$PYTHON_SCRIPT2 ! gvapython module=$PYTHON_SCRIPT3 class=AgeLogger function=log_age kwarg={\\"log_file_path\\":\\"/tmp/age_log.txt\\"} ! $SINK_ELEMENT 
+gst-launch-1.0 $SOURCE_ELEMENT ! decodebin3 ! gvainference model=$DETECT_MODEL_PATH device=$DEVICE ! queue ! gvapython module=$PYTHON_SCRIPT1 ! gvainference inference-region=roi-list model=$CLASS_MODEL_PATH device=$DEVICE ! queue ! gvapython module=$PYTHON_SCRIPT2 ! gvapython module=$PYTHON_SCRIPT3 class=AgeLogger function=log_age kwarg={\\"log_file_path\\":\\"/tmp/age_log.txt\\"} ! $SINK_ELEMENT 
 EOM
 
 echo "${PIPELINE}"
