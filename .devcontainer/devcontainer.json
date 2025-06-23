@@ -13,7 +13,7 @@
 		"--device=/dev/dri",
 		"-e",
 		"DISPLAY=${env:DISPLAY}",
-		// "--group-add=$(stat -c \"%g\" /dev/dri/render*)",
+		// "--group-add=$(stat -c \"%g\" /dev/dri/render* | head -n 1)",
 		"--group-add=992",
 		"-v",
 		"/tmp/.X11-unix:/tmp/.X11-unix"
@@ -27,29 +27,26 @@
 		}
 	},
 	"containerEnv": {
-
+		"MODELS_PATH": "${containerWorkspaceFolder}/../thirdparty/models",
+		"VIDEOS_PATH": "${containerWorkspaceFolder}/../thirdparty/videos"
 	},
 	"remoteEnv": {
-		"PATH": "${containerEnv:PATH}:${containerWorkspaceFolder}/build/intel64/Debug/lib",
-		"LD_LIBRARY_PATH": "${containerEnv:LD_LIBRARY_PATH}:${containerWorkspaceFolder}/build/intel64/Debug/lib"
+		"PATH": "${containerWorkspaceFolder}/build/intel64/Debug/lib:${containerEnv:PATH}",
+		"LD_LIBRARY_PATH": "${containerWorkspaceFolder}/build/intel64/Debug/lib:${containerEnv:LD_LIBRARY_PATH}",
+		"GST_PLUGIN_PATH": "${containerWorkspaceFolder}/build/intel64/Debug/lib:${containerEnv:GST_PLUGIN_PATH}"
 	},
 	"mounts": [
 		"source=${localWorkspaceFolder}/../thirdparty,target=${containerWorkspaceFolder}/../thirdparty,type=bind,consistency=cached",
 		"source=/etc/localtime,target=/etc/localtime,type=bind,readonly"
 	],
-
 	// Features to add to the dev container. More info: https://containers.dev/features.
 	// "features": {},
-
 	// Use 'forwardPorts' to make a list of ports inside the container available locally.
 	// "forwardPorts": [],
-
 	// Uncomment the next line to run commands after the container is created.
 	// "postCreateCommand": "cat /etc/os-release",
-
 	// Configure tool-specific properties.
 	// "customizations": {},
-
 	// Uncomment to connect as an existing user other than the container default. More info: https://aka.ms/dev-containers-non-root.
 	// "remoteUser": "devcontainer"
 }

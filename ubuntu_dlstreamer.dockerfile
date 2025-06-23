@@ -1,4 +1,4 @@
-FROM intel/dlstreamer:2024.1.2-dev-ubuntu22
+FROM intel/dlstreamer:2025.0.1.3-dev-ubuntu22
 
 USER root
 
@@ -16,3 +16,5 @@ RUN apt update \
     && rm -rf /var/lib/apt/lists/*
 
 USER dlstreamer
+RUN python3 -m pip install --upgrade pip
+RUN python3 -m pip install openvino-dev[onnx,tensorflow,pytorch]
